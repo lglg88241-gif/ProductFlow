@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: productflow
     ports:
-      - "${POSTGRES_HOST_PORT:-15432}:5432"
+      # Bind to loopback only: service-to-service traffic stays on the compose network,
+      # and host tools (psql, redis-cli) can still connect without LAN exposure.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
     volumes:
       - productflow-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -21,7 +23,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "${REDIS_HOST_PORT:-16379}:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-16379}:6379"
     volumes:
       - productflow-redis-data:/data
     healthcheck:
