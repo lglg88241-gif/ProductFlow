@@ -138,7 +138,13 @@ def ensure_provider_config_bootstrapped(session: Session | None = None) -> None:
             purpose=IMAGE_PURPOSE,
             provider_kind=image_kind,
             provider_profile=profile,
-            model_settings={"model": settings.image_generate_model},
+            model_settings={
+                "model": (
+                    "gpt-image-2"
+                    if image_kind == "openai_images" and settings.image_generate_model == "gpt-5.4"
+                    else settings.image_generate_model
+                )
+            },
             config={
                 "images_quality": settings.image_images_quality,
                 "images_style": settings.image_images_style,
@@ -283,6 +289,8 @@ def update_provider_binding(
     config: dict[str, Any],
     commit: bool = True,
 ) -> ProviderBinding:
+    if purpose == IMAGE_PURPOSE and provider_kind == "openai_images" and not _optional_str(model_settings.get("model")):
+        model_settings = {**model_settings, "model": "gpt-image-2"}
     _validate_binding_payload(
         session,
         purpose=purpose,

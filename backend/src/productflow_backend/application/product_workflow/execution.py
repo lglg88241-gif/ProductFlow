@@ -16,6 +16,10 @@ from productflow_backend.application.copy_payloads import (
     normalize_copy_node_config,
     validate_copy_payload,
 )
+from productflow_backend.application.moments_poster_templates import (
+    canvas_template_key_from_config,
+    moments_template_design,
+)
 from productflow_backend.application.product_workflow import graph as product_workflow_graph
 from productflow_backend.application.product_workflow.artifacts import (
     copy_node_output,
@@ -57,6 +61,7 @@ from productflow_backend.application.time import now_utc
 from productflow_backend.domain.durable_generation_tasks import WORKFLOW_RUN_GENERATION_TASK_CONTRACT
 from productflow_backend.domain.enums import (
     CopyStatus,
+    SourceAssetKind,
     WorkflowNodeStatus,
     WorkflowNodeType,
     WorkflowRunStatus,
@@ -918,6 +923,15 @@ def _execute_reference_image(session: Session, *, workflow: ProductWorkflow, nod
     asset_ids = source_asset_ids_from_config(node.config_json)
     assets = WorkflowQueryService(session).source_assets_by_ids(asset_ids)
     assets = [asset for asset in assets if asset.product_id == workflow.product_id]
+    template_design = moments_template_design(canvas_template_key_from_config(node.config_json))
+    if not assets and template_design is not None:
+        assets = [
+            asset
+            for asset in workflow.product.source_assets
+            if asset.kind in {SourceAssetKind.ORIGINAL_IMAGE, SourceAssetKind.REFERENCE_IMAGE}
+            and asset.source_poster_variant_id is None
+        ]
+        assets.sort(key=lambda asset: (asset.kind != SourceAssetKind.ORIGINAL_IMAGE, asset.created_at, asset.id))
     if not assets:
         return image_asset_output([], summary="参考图为空")
     return image_asset_output(

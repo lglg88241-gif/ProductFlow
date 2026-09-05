@@ -12,7 +12,7 @@ interface HistoryBranchStripProps {
   branch: ImageHistoryBranch;
   selectedGeneratedAssetId: string | null;
   selectedTaskPlaceholderId: string | null;
-  branchBaseAssetId: string | null;
+  currentContextAssetId: string | null;
   variant?: "desktop" | "mobileDrawer";
   onSelectRound: (assetId: string) => void;
   onSelectPlaceholder: (placeholderId: string) => void;
@@ -24,7 +24,7 @@ export function HistoryBranchStrip({
   branch,
   selectedGeneratedAssetId,
   selectedTaskPlaceholderId,
-  branchBaseAssetId,
+  currentContextAssetId,
   variant = "desktop",
   onSelectRound,
   onSelectPlaceholder,
@@ -53,7 +53,7 @@ export function HistoryBranchStrip({
               candidate={candidate}
               selectedGeneratedAssetId={selectedGeneratedAssetId}
               selectedTaskPlaceholderId={selectedTaskPlaceholderId}
-              branchBaseAssetId={branchBaseAssetId}
+              currentContextAssetId={currentContextAssetId}
               variant="mobileDrawer"
               onSelectRound={onSelectRound}
               onSelectPlaceholder={onSelectPlaceholder}
@@ -105,7 +105,7 @@ export function HistoryBranchStrip({
             candidate={candidate}
             selectedGeneratedAssetId={selectedGeneratedAssetId}
             selectedTaskPlaceholderId={selectedTaskPlaceholderId}
-            branchBaseAssetId={branchBaseAssetId}
+            currentContextAssetId={currentContextAssetId}
             variant={variant}
             onSelectRound={onSelectRound}
             onSelectPlaceholder={onSelectPlaceholder}
@@ -121,7 +121,7 @@ interface HistoryCandidateCardProps {
   candidate: ImageHistoryCandidate;
   selectedGeneratedAssetId: string | null;
   selectedTaskPlaceholderId: string | null;
-  branchBaseAssetId: string | null;
+  currentContextAssetId: string | null;
   variant?: "desktop" | "mobileDrawer";
   onSelectRound: (assetId: string) => void;
   onSelectPlaceholder: (placeholderId: string) => void;
@@ -132,7 +132,7 @@ function HistoryCandidateCard({
   candidate,
   selectedGeneratedAssetId,
   selectedTaskPlaceholderId,
-  branchBaseAssetId,
+  currentContextAssetId,
   variant = "desktop",
   onSelectRound,
   onSelectPlaceholder,
@@ -181,11 +181,11 @@ function HistoryCandidateCard({
 
   const round = candidate.round;
   const active = round.generated_asset.id === selectedGeneratedAssetId;
-  const asBase = round.generated_asset.id === branchBaseAssetId;
+  const isCurrentContext = round.generated_asset.id === currentContextAssetId;
   const candidateLabel =
     round.candidate_count > 1 ? `${round.candidate_index}/${round.candidate_count}` : imageRoundSizeLabel(round, t);
   return (
-    <div className={`${cardClassName(active, asBase)} ${asBase ? "" : "shadow-sm shadow-slate-200/60 dark:shadow-slate-950/30"}`}>
+    <div className={`${cardClassName(active, isCurrentContext)} ${isCurrentContext ? "" : "shadow-sm shadow-slate-200/60 dark:shadow-slate-950/30"}`}>
       <button type="button" onClick={() => onSelectRound(round.generated_asset.id)} className="block h-full w-full text-left">
         <img
           src={api.toApiUrl(round.generated_asset.thumbnail_url)}
@@ -201,9 +201,9 @@ function HistoryCandidateCard({
           </div>
         </div>
       </button>
-      {asBase ? (
+      {isCurrentContext ? (
         <div className="absolute left-1.5 top-1.5 max-w-[calc(100%-2.75rem)] truncate rounded-full bg-indigo-600 px-1.5 py-0.5 text-[10px] font-semibold text-white shadow-sm dark:bg-violet-500/85 dark:ring-1 dark:ring-violet-200/30">
-          {t("chat.baseImage")}
+          {t("chat.currentResult")}
         </div>
       ) : null}
     </div>

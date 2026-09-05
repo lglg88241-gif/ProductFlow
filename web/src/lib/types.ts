@@ -31,7 +31,10 @@ export type CanvasTemplateScenario =
   | "detail_material"
   | "campaign_promotion"
   | "short_video_cover"
-  | "white_background";
+  | "white_background"
+  | "moments_beauty_clean"
+  | "moments_beauty_neon"
+  | "moments_beauty_luxe";
 
 export interface SessionState {
   authenticated: boolean;
@@ -188,6 +191,12 @@ export interface CreateProductInput {
   template_language?: string;
   file: File;
   referenceFiles?: File[];
+}
+
+export interface CopyInputExtractionResponse {
+  text: string;
+  source_kind: "text" | "image_ocr";
+  warnings: string[];
 }
 
 export interface WorkflowNode {
@@ -508,8 +517,22 @@ export interface ImageSessionDetail {
   assets: ImageSessionAsset[];
   rounds: ImageSessionRound[];
   generation_tasks: ImageSessionGenerationTask[];
+  messages?: ImageSessionMessage[];
   created_at: string;
   updated_at: string;
+}
+
+export interface ImageSessionMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
+export interface ImageSessionDiscussionResponse {
+  user_message: ImageSessionMessage;
+  assistant_message: ImageSessionMessage;
+  session: ImageSessionDetail;
 }
 
 export interface ImageSessionStatus {

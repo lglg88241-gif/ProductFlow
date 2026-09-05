@@ -1,4 +1,4 @@
-import { Layers3, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 
 import { api } from "../../lib/api";
 import { formatDateTime } from "../../lib/format";
@@ -11,7 +11,6 @@ import { placeholderSizeLabel, placeholderStatusLabel } from "./display";
 interface ImageChatMainStageProps {
   selectedRound: ImageSessionRound | null;
   selectedPlaceholder: ImageHistoryPlaceholderCandidate | null;
-  branchBaseRound: ImageSessionRound | null;
   retryingTaskId: string | null;
   cancellingTaskId: string | null;
   regenerating: boolean;
@@ -25,7 +24,6 @@ interface ImageChatMainStageProps {
 export function ImageChatMainStage({
   selectedRound,
   selectedPlaceholder,
-  branchBaseRound,
   retryingTaskId,
   cancellingTaskId,
   regenerating,
@@ -52,14 +50,6 @@ export function ImageChatMainStage({
             {t("chat.waitingFirstResult")}
           </div>
         )}
-        <div className="ml-auto flex shrink-0 items-center gap-2">
-          {branchBaseRound ? (
-            <div className="hidden h-8 items-center gap-1.5 rounded-full bg-indigo-600 px-3 text-xs font-semibold text-white shadow-sm shadow-indigo-500/20 dark:bg-violet-500/20 dark:text-violet-100 dark:ring-1 dark:ring-violet-400/40 sm:inline-flex">
-              <Layers3 size={13} />
-              {t("chat.baseSelected")}
-            </div>
-          ) : null}
-        </div>
       </div>
 
       {selectedRound ? (

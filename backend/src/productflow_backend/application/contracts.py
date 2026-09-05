@@ -212,5 +212,8 @@ class PosterGenerationInput(BaseModel):
     image_size: str | None = None
     tool_options: dict[str, Any] | None = None
     structured_copy_context: str | None = None
+    template_key: str | None = None
+    template_style_spec: str | None = None
+    full_canvas_redesign: bool = False
     source_image: Path | None = None
     reference_images: list[ReferenceImageInput] = Field(default_factory=list)

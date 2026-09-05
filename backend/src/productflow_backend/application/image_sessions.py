@@ -38,11 +38,12 @@ from productflow_backend.domain.durable_generation_tasks import (
     QUEUE_UNAVAILABLE_DETAIL,
 )
 from productflow_backend.domain.enums import ImageSessionAssetKind, JobStatus, SourceAssetKind
-from productflow_backend.domain.errors import BusinessValidationError, NotFoundError
+from productflow_backend.domain.errors import BusinessError, BusinessValidationError, NotFoundError
 from productflow_backend.infrastructure.db.models import (
     ImageSession,
     ImageSessionAsset,
     ImageSessionGenerationTask,
+    ImageSessionMessage,
     ImageSessionRound,
     Product,
     SourceAsset,
@@ -52,11 +53,13 @@ from productflow_backend.infrastructure.db.session import get_session_factory
 from productflow_backend.infrastructure.image.base import infer_extension
 from productflow_backend.infrastructure.image.chat_service import ImageChatService, ImageChatTurn
 from productflow_backend.infrastructure.image.responses_provider import PROVIDER_TEXT_OUTPUT_MESSAGE
+from productflow_backend.infrastructure.provider_config import resolve_image_provider_config
 from productflow_backend.infrastructure.queue import (
     enqueue_image_session_generation_task,
     enqueue_image_session_generation_task_later,
 )
 from productflow_backend.infrastructure.storage import LocalStorage
+from productflow_backend.infrastructure.text.factory import get_text_provider
 
 ATTACH_TARGET = Literal["reference", "main_source"]
 DEFAULT_SESSION_TITLE = "未命名会话"
@@ -102,6 +105,13 @@ class ImageSessionStatusSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ImageSessionDiscussionResult:
+    image_session: ImageSession
+    user_message: ImageSessionMessage
+    assistant_message: ImageSessionMessage
+
+
+@dataclass(frozen=True, slots=True)
 class ImageSessionGenerationExecutionError(Exception):
     completed_candidates: int
     requested_candidates: int
@@ -122,6 +132,7 @@ def _image_session_query():
             selectinload(ImageSession.assets),
             selectinload(ImageSession.rounds).selectinload(ImageSessionRound.generated_asset),
             selectinload(ImageSession.generation_tasks),
+            selectinload(ImageSession.messages),
         )
         .order_by(desc(ImageSession.updated_at))
     )
@@ -245,6 +256,26 @@ def _has_prior_generation_request(
     return False
 
 
+def _recent_image_session_rounds(
+    image_session: ImageSession,
+    *,
+    limit: int = 8,
+) -> list[ImageSessionRound]:
+    """Return one representative row for each of the most recent generation groups."""
+    sorted_rounds = sorted(image_session.rounds, key=lambda item: (item.created_at, item.id))
+    selected: list[ImageSessionRound] = []
+    seen_groups: set[str] = set()
+    for round_item in reversed(sorted_rounds):
+        group_id = round_item.generation_group_id or round_item.id
+        if group_id in seen_groups:
+            continue
+        seen_groups.add(group_id)
+        selected.append(round_item)
+        if len(selected) >= limit:
+            break
+    return list(reversed(selected))
+
+
 def _build_branch_generation_context(
     image_session: ImageSession,
     storage: LocalStorage,
@@ -252,12 +283,45 @@ def _build_branch_generation_context(
     base_asset_id: str | None,
     selected_reference_asset_ids: list[str] | None,
 ) -> tuple[list[ImageChatTurn], list[str], str | None, str | None, list[str]]:
-    """构建卡片式分支上下文：只使用显式 base 和本轮勾选参考图。"""
+    """Build bounded text context and ordered image inputs for the current branch."""
     manual_references: list[str] = []
     normalized_base_asset_id: str | None = None
     selected_reference_ids = _unique_ids(selected_reference_asset_ids)
-    if (1 if base_asset_id else 0) + len(selected_reference_ids) > MAX_BRANCH_CONTEXT_IMAGES:
-        raise BusinessValidationError("本轮最多选择 6 张图片上下文（含分支基图）")
+
+    # Discussion and generation history are intentionally bounded.  Generated
+    # images are represented only by the current base turn below; old
+    # candidates remain text context and are never sent as hidden image inputs.
+    context_items: list[tuple[datetime, str, ImageChatTurn]] = []
+    for message in sorted(image_session.messages, key=lambda item: (item.created_at, item.id))[-12:]:
+        role: Literal["user", "assistant"] = "user" if message.role == "user" else "assistant"
+        context_items.append((message.created_at, message.id, ImageChatTurn(role=role, content=message.content)))
+    for round_item in _recent_image_session_rounds(image_session):
+        context_items.append(
+            (
+                round_item.created_at,
+                f"{round_item.id}:prompt",
+                ImageChatTurn(
+                    role="user",
+                    content=(
+                        "上一轮生成请求（仅作方向参考，不能覆盖本轮用户要求）：\n"
+                        f"{round_item.prompt}"
+                    ),
+                ),
+            )
+        )
+        context_items.append(
+            (
+                round_item.created_at,
+                f"{round_item.id}:assistant",
+                ImageChatTurn(
+                    role="assistant",
+                    content=(
+                        "上一轮生成结果说明（仅作建议，不是硬约束）：\n"
+                        f"{round_item.assistant_message}"
+                    ),
+                ),
+            )
+        )
 
     if base_asset_id:
         base_asset = _find_session_asset_or_raise(
@@ -266,7 +330,10 @@ def _build_branch_generation_context(
             expected_kind=ImageSessionAssetKind.GENERATED_IMAGE,
         )
         normalized_base_asset_id = base_asset.id
-        manual_references.append(_session_data_url(storage, base_asset.storage_path, base_asset.mime_type))
+        base_data_url = _session_data_url(storage, base_asset.storage_path, base_asset.mime_type)
+        # The current image must be first. Historical candidates stay in text
+        # context only, so this is the sole image input representing the branch.
+        manual_references.append(base_data_url)
 
     normalized_reference_ids: list[str] = []
     for asset_id in selected_reference_ids:
@@ -279,7 +346,46 @@ def _build_branch_generation_context(
         normalized_reference_ids.append(reference_asset.id)
         manual_references.append(_session_data_url(storage, reference_asset.storage_path, reference_asset.mime_type))
 
-    return [], manual_references[:6], None, normalized_base_asset_id, normalized_reference_ids
+    context_items.sort(key=lambda item: (item[0], item[1]))
+    return (
+        [item[2] for item in context_items],
+        manual_references,
+        None,
+        normalized_base_asset_id,
+        normalized_reference_ids,
+    )
+
+
+def _validate_image_session_provider(tool_options: dict[str, Any] | None) -> None:
+    """Keep free-form image sessions on the Images API contract."""
+    if isinstance(tool_options, dict):
+        requested_model = tool_options.get("model")
+        if (
+            requested_model is not None
+            and str(requested_model).strip()
+            and str(requested_model).strip() != "gpt-image-2"
+        ):
+            raise BusinessValidationError("图片共创会话只支持 gpt-image-2，请移除其他模型设置")
+        if tool_options.get("input_fidelity") is not None:
+            raise BusinessValidationError("gpt-image-2 不支持 input_fidelity，请移除该参数")
+
+    try:
+        provider_config = resolve_image_provider_config()
+    except (RuntimeError, ValueError) as exc:
+        # Provider configuration is user-actionable at submission time. Keep
+        # the detail useful without allowing a raw infrastructure traceback to
+        # escape as an opaque 500 response.
+        raise BusinessValidationError("图片共创供应商配置不可用，请检查图片 provider、模型和 API Key") from exc
+    if provider_config.provider_kind == "mock":
+        return
+    if provider_config.provider_kind != "openai_images":
+        raise BusinessValidationError("图片共创会话需要将图片供应商改为 openai_images")
+    if provider_config.model != "gpt-image-2":
+        raise BusinessValidationError(
+            f"图片共创会话需要将图片模型改为 gpt-image-2（当前为 {provider_config.model}）"
+        )
+    if not provider_config.api_key:
+        raise BusinessValidationError("图片供应商缺少 API Key，请在供应商设置中配置有效密钥后重试")
 
 
 def _validate_generation_request(
@@ -297,8 +403,7 @@ def _validate_generation_request(
         raise BusinessValidationError(f"一次生成数量必须在 1-{max_generation_count} 张之间")
     normalized_size = normalize_image_generation_size(size)
     selected_reference_ids = _unique_ids(selected_reference_asset_ids)
-    if (1 if base_asset_id else 0) + len(selected_reference_ids) > MAX_BRANCH_CONTEXT_IMAGES:
-        raise BusinessValidationError("本轮最多选择 6 张图片上下文（含分支基图）")
+    _validate_image_session_provider(tool_options)
 
     normalized_base_asset_id: str | None = None
     if base_asset_id:
@@ -309,7 +414,12 @@ def _validate_generation_request(
         )
         normalized_base_asset_id = base_asset.id
     elif _has_prior_generation_request(image_session, current_generation_task_id=current_generation_task_id):
-        raise BusinessValidationError("后续生图必须选择一张本会话已生成图片作为基图")
+        latest_round = max(image_session.rounds, key=lambda item: (item.created_at, item.id), default=None)
+        if latest_round is not None:
+            normalized_base_asset_id = latest_round.generated_asset_id
+
+    if (1 if normalized_base_asset_id else 0) + len(selected_reference_ids) > MAX_BRANCH_CONTEXT_IMAGES:
+        raise BusinessValidationError("本轮最多选择 6 张图片上下文（含分支基图）")
 
     normalized_reference_ids: list[str] = []
     for asset_id in selected_reference_ids:
@@ -324,8 +434,40 @@ def _validate_generation_request(
     return normalized_size, normalized_base_asset_id, normalized_reference_ids
 
 
-def _normalize_tool_options(tool_options: dict[str, Any] | None) -> dict[str, Any] | None:
-    return normalize_image_generation_tool_options(tool_options)
+def _quality_override_from_prompt(prompt: str) -> Literal["low", "high"] | None:
+    normalized = prompt.casefold()
+    quality_markers: tuple[tuple[str, Literal["low", "high"]], ...] = (
+        ("最终版", "high"),
+        ("高质量", "high"),
+        ("高清", "high"),
+        ("交付版", "high"),
+        ("final version", "high"),
+        ("high quality", "high"),
+        ("delivery version", "high"),
+        ("草图", "low"),
+        ("快速看方向", "low"),
+        ("draft", "low"),
+        ("quick direction", "low"),
+    )
+    matches = [
+        (normalized.rfind(marker), quality)
+        for marker, quality in quality_markers
+        if marker in normalized
+    ]
+    return max(matches, default=(-1, None), key=lambda item: item[0])[1]
+
+
+def _normalize_tool_options(
+    prompt: str,
+    tool_options: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if isinstance(tool_options, dict):
+        _validate_image_session_provider(tool_options)
+    normalized = normalize_image_generation_tool_options(tool_options) or {}
+    quality_override = _quality_override_from_prompt(prompt)
+    if quality_override is not None:
+        normalized["quality"] = quality_override
+    return normalized or None
 
 
 def _images_api_batch_count(
@@ -414,6 +556,109 @@ def create_image_session(
     return _get_image_session_or_raise(session, image_session.id)
 
 
+def discuss_image_session(
+    session: Session,
+    *,
+    image_session_id: str,
+    content: str,
+    current_asset_id: str | None = None,
+    selected_reference_asset_ids: list[str] | None = None,
+    storage: LocalStorage | None = None,
+) -> ImageSessionDiscussionResult:
+    """Persist a normal creative-chat turn without creating an image task."""
+    image_session = _get_image_session_or_raise(session, image_session_id)
+    normalized_content = content.strip()
+    if not normalized_content:
+        raise BusinessValidationError("讨论内容不能为空")
+    storage = storage or LocalStorage()
+
+    current_asset: ImageSessionAsset | None = None
+    if current_asset_id:
+        current_asset = _find_session_asset_or_raise(
+            image_session,
+            current_asset_id,
+            expected_kind=ImageSessionAssetKind.GENERATED_IMAGE,
+        )
+    else:
+        latest_round = max(image_session.rounds, key=lambda item: (item.created_at, item.id), default=None)
+        current_asset = latest_round.generated_asset if latest_round else None
+
+    reference_urls: list[str] = []
+    for asset_id in _unique_ids(selected_reference_asset_ids):
+        reference = _find_session_asset_or_raise(
+            image_session,
+            asset_id,
+            expected_kind=ImageSessionAssetKind.REFERENCE_UPLOAD,
+            missing_message="会话参考图不存在",
+        )
+        reference_urls.append(_session_data_url(storage, reference.storage_path, reference.mime_type))
+    if (1 if current_asset else 0) + len(reference_urls) > MAX_BRANCH_CONTEXT_IMAGES:
+        raise BusinessValidationError("本轮最多选择 6 张图片上下文（含当前作品）")
+
+    recent_messages: list[dict[str, str]] = []
+    for round_item in _recent_image_session_rounds(image_session):
+        recent_messages.extend(
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "上一轮生成请求（仅作方向参考，不能覆盖本轮用户要求）：\n"
+                        f"{round_item.prompt}"
+                    ),
+                    "context_kind": "generation_round",
+                },
+                {
+                    "role": "assistant",
+                    "content": (
+                        "上一轮生成结果说明（仅作建议，不是硬约束）：\n"
+                        f"{round_item.assistant_message}"
+                    ),
+                    "context_kind": "generation_round",
+                },
+            ]
+        )
+    recent_messages.extend(
+        {
+            "role": item.role,
+            "content": item.content,
+            "context_kind": "discussion",
+        }
+        for item in sorted(image_session.messages, key=lambda item: (item.created_at, item.id))[-11:]
+    )
+    recent_messages.append(
+        {"role": "user", "content": normalized_content, "context_kind": "discussion"}
+    )
+    try:
+        provider = get_text_provider()
+        assistant_content, _model_name = provider.generate_image_chat_advice(
+            recent_messages,
+            current_image_data_url=(
+                _session_data_url(storage, current_asset.storage_path, current_asset.mime_type)
+                if current_asset
+                else None
+            ),
+            reference_image_data_urls=reference_urls,
+        )
+    except BusinessError:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        raise BusinessValidationError("图片创意顾问暂时不可用，请检查文案 provider 配置后重试") from exc
+    user_message = ImageSessionMessage(session_id=image_session.id, role="user", content=normalized_content)
+    assistant_message = ImageSessionMessage(session_id=image_session.id, role="assistant", content=assistant_content)
+    session.add_all([user_message, assistant_message])
+    image_session.updated_at = now_utc()
+    session.commit()
+    session.expire_all()
+    refreshed = _get_image_session_or_raise(session, image_session.id)
+    saved_user = session.get(ImageSessionMessage, user_message.id) or user_message
+    saved_assistant = session.get(ImageSessionMessage, assistant_message.id) or assistant_message
+    return ImageSessionDiscussionResult(
+        image_session=refreshed,
+        user_message=saved_user,
+        assistant_message=saved_assistant,
+    )
+
+
 def update_image_session(
     session: Session,
     *,
@@ -499,7 +744,7 @@ def _execute_image_session_round_generation(
     size: str,
     base_asset_id: str | None = None,
     selected_reference_asset_ids: list[str] | None = None,
-    generation_count: int = 1,
+    generation_count: int = 2,
     tool_options: dict[str, Any] | None = None,
     storage: LocalStorage | None = None,
     generation_task_id: str | None = None,
@@ -509,8 +754,7 @@ def _execute_image_session_round_generation(
     storage = storage or LocalStorage()
     generation_task = session.get(ImageSessionGenerationTask, generation_task_id) if generation_task_id else None
     normalized_prompt = _normalize_generation_prompt(prompt)
-    normalized_tool_options = _normalize_tool_options(tool_options)
-    service = ImageChatService()
+    normalized_tool_options = _normalize_tool_options(normalized_prompt, tool_options)
     normalized_size, normalized_base_asset_id, normalized_reference_ids = _validate_generation_request(
         image_session,
         size=size,
@@ -520,6 +764,7 @@ def _execute_image_session_round_generation(
         tool_options=normalized_tool_options,
         current_generation_task_id=generation_task_id,
     )
+    service = ImageChatService()
     (
         history,
         manual_references,
@@ -597,6 +842,7 @@ def _execute_image_session_round_generation(
                         history=history,
                         manual_reference_images=manual_references,
                         candidate_count=batch_count,
+                        current_image_present=_validated_base_asset_id is not None,
                         tool_options=normalized_tool_options,
                     )
                     result = provider_results[0]
@@ -607,6 +853,7 @@ def _execute_image_session_round_generation(
                         size=normalized_size,
                         history=history,
                         manual_reference_images=manual_references,
+                        current_image_present=_validated_base_asset_id is not None,
                         previous_response_id=previous_response_id,
                         tool_options=normalized_tool_options,
                         progress_callback=_provider_progress_callback(
@@ -689,6 +936,8 @@ def _execute_image_session_round_generation(
                     task.progress_phase = "candidate_saved"
                     task.progress_updated_at = now_utc()
                     task.result_generation_group_id = generation_group_id
+                    task.provider_response_id = result.provider_response_id
+                    task.provider_response_status = "completed" if result.provider_response_id else None
                     task.progress_metadata = {
                         "candidate_index": candidate_index,
                         "candidate_count": generation_count,
@@ -747,7 +996,7 @@ def generate_image_session_round(
     size: str,
     base_asset_id: str | None = None,
     selected_reference_asset_ids: list[str] | None = None,
-    generation_count: int = 1,
+    generation_count: int = 2,
     tool_options: dict[str, Any] | None = None,
     storage: LocalStorage | None = None,
 ) -> ImageSession:
@@ -773,13 +1022,13 @@ def create_image_session_generation_task(
     size: str,
     base_asset_id: str | None = None,
     selected_reference_asset_ids: list[str] | None = None,
-    generation_count: int = 1,
+    generation_count: int = 2,
     tool_options: dict[str, Any] | None = None,
 ) -> ImageSessionGenerationTaskCreationResult:
     """校验并创建连续生图 durable 任务；不调用 provider。"""
     image_session = _get_image_session_or_raise(session, image_session_id)
     normalized_prompt = _normalize_generation_prompt(prompt)
-    normalized_tool_options = _normalize_tool_options(tool_options)
+    normalized_tool_options = _normalize_tool_options(normalized_prompt, tool_options)
     normalized_size, normalized_base_asset_id, normalized_reference_ids = _validate_generation_request(
         image_session,
         size=size,
@@ -817,7 +1066,7 @@ def submit_image_session_generation_task(
     size: str,
     base_asset_id: str | None = None,
     selected_reference_asset_ids: list[str] | None = None,
-    generation_count: int = 1,
+    generation_count: int = 2,
     tool_options: dict[str, Any] | None = None,
     enqueue: Callable[[str], None] | None = None,
 ) -> ImageSession:

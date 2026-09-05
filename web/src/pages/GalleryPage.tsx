@@ -74,114 +74,83 @@ export function GalleryPage() {
   });
 
   return (
-    <div className="min-h-screen bg-[#07111d] text-slate-950">
+    <div className="min-h-screen bg-slate-50 text-slate-950 dark:bg-[#060a12] dark:text-slate-100">
       <TopNav breadcrumbs={t("gallery.title")} onHome={() => navigate("/products")} onLogout={() => logoutMutation.mutate()} />
 
-      <main className="w-full">
+      <main className="mx-auto w-full max-w-[1480px] px-4 py-5 pb-28 sm:px-6 lg:px-8 lg:py-8">
         {galleryQuery.isLoading ? (
-          <div className="flex min-h-[calc(100svh-80px)] items-center justify-center bg-[#f3eadc] text-slate-500">
+          <div className="flex min-h-[calc(100svh-10rem)] items-center justify-center text-slate-500">
             <Loader2 size={28} className="animate-spin" />
           </div>
         ) : galleryQuery.isError ? (
-          <div className="flex min-h-[calc(100svh-80px)] items-center justify-center bg-[#f3eadc] px-6 text-sm font-medium text-red-700">
+          <div className="flex min-h-[calc(100svh-10rem)] items-center justify-center px-6 text-sm font-medium text-red-700 dark:text-red-300">
             {t("gallery.loadFailed")}
           </div>
         ) : entries.length ? (
-          <>
-            <section className="relative isolate min-h-[420px] overflow-hidden bg-[#f4eddf] sm:min-h-[480px] lg:min-h-[460px]">
-              <img
-                src="/hero.png"
-                alt=""
-                decoding="async"
-                className="absolute inset-y-0 right-0 h-full w-full object-cover object-center opacity-35 sm:opacity-50 lg:w-[62%] lg:opacity-100"
-              />
-              <div className="absolute inset-0 bg-[linear-gradient(90deg,#f4eddf_0%,rgba(244,237,223,0.99)_36%,rgba(244,237,223,0.72)_52%,rgba(244,237,223,0.08)_76%,rgba(244,237,223,0)_100%)]" />
-              <div className="absolute inset-x-0 bottom-0 h-px bg-[#020617]/10" />
-              <div className="absolute left-5 top-16 hidden h-64 flex-col items-center gap-4 text-[#1d4cff] sm:flex">
-                <span className="h-2 w-2 rounded-full bg-[#1d4cff]" />
-                <span className="h-28 w-px bg-[#1d4cff]/30" />
-                <span className="[writing-mode:vertical-rl] text-xs font-black uppercase tracking-[0.18em]">Gallery</span>
-                <span className="h-2 w-2 rounded-full border-2 border-[#1d4cff]" />
-              </div>
-
-              <div className="relative z-10 mx-auto grid min-h-[420px] max-w-7xl grid-cols-1 px-6 py-14 sm:min-h-[480px] sm:px-10 lg:min-h-[460px] lg:grid-cols-[minmax(0,0.43fr)_minmax(360px,0.57fr)] lg:items-center lg:px-14">
-                <div className="max-w-xl">
-                  <div className="mb-7 h-px w-44 bg-[#020617]/22" />
-                  <h1 className="text-6xl font-black leading-none text-[#020617] sm:text-7xl lg:text-8xl">
-                    {t("gallery.title")}
-                  </h1>
-                  <p className="mt-6 max-w-md text-base leading-7 text-[#1f2937]">
-                    {t("gallery.description")}
-                  </p>
-                  <div className="mt-7 flex max-w-xs items-center gap-3">
-                    <span className="relative h-4 w-4 rounded-full border-2 border-[#020617]">
-                      <span className="absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#020617]" />
-                    </span>
-                    <span className="h-px flex-1 bg-[#020617]/18" />
-                  </div>
+          <section aria-labelledby="gallery-heading">
+            <header className="mb-6 flex flex-wrap items-end justify-between gap-4 border-b border-slate-200 pb-5 dark:border-slate-800">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-indigo-600 dark:text-violet-300">
+                  {t("gallery.feed")}
                 </div>
-
-                <div className="hidden lg:block" />
+                <h1 id="gallery-heading" className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">
+                  {t("gallery.title")}
+                </h1>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-500 dark:text-slate-400">
+                  {t("gallery.description")}
+                </p>
               </div>
-            </section>
-
-            <section className="bg-[#07111d] px-4 py-8 sm:px-6 lg:px-10">
-              <div className="mx-auto mb-6 flex max-w-7xl items-end justify-between gap-4 border-b border-white/10 pb-5">
-                <div>
-                  <div className="text-xs font-bold uppercase text-indigo-300">{t("gallery.feed")}</div>
-                  <h2 className="mt-2 text-2xl font-black text-white">{t("gallery.works")}</h2>
-                </div>
-                <div className="text-sm font-medium text-white/55">{t("gallery.count", { count: entries.length })}</div>
+              <div className="text-sm font-medium text-slate-500 dark:text-slate-400">
+                {t("gallery.count", { count: entries.length })}
               </div>
+            </header>
 
-              <div
-                ref={gridRef}
-                className="mx-auto grid max-w-7xl grid-flow-dense grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-12 lg:auto-rows-[8px]"
-              >
-                {entries.map((entry, index) => {
-                  const tileLayout = galleryTileLayout(entry, index, gridContentWidth ?? undefined);
-                  const tileStyle: CSSProperties = {
-                    aspectRatio: tileLayout.aspectRatio,
-                    ...(isDesktopGrid ? { gridRowEnd: `span ${tileLayout.rowSpan}` } : {}),
-                  };
-                  return (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      onClick={() => setPreviewEntry(entry)}
-                      className={`group relative min-w-0 overflow-hidden rounded-md bg-slate-900 text-left shadow-sm transition duration-300 hover:-translate-y-1 hover:shadow-2xl hover:shadow-[#0b4eea]/20 ${tileLayout.className}`}
-                      style={tileStyle}
-                    >
-                      <div className="relative h-full overflow-hidden bg-slate-900">
-                        <img
-                          src={api.toApiUrl(entry.image.thumbnail_url)}
-                          alt={entry.prompt ?? entry.image.original_filename}
-                          loading="lazy"
-                          decoding="async"
-                          className="h-full w-full object-contain transition duration-300"
-                        />
-                        <div className="absolute inset-0 bg-gradient-to-t from-slate-950/82 via-slate-950/10 to-transparent opacity-80 transition-opacity group-hover:opacity-95" />
-                        <div className="absolute inset-x-0 bottom-0 p-4 text-white">
-                          <div className="line-clamp-2 text-sm font-semibold leading-5">
-                            {entry.prompt ?? entry.image.original_filename}
-                          </div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold text-white/70">
-                            <span>{galleryEntrySizeLabel(entry, locale)}</span>
-                            <span>{formatDateTime(entry.created_at, locale)}</span>
-                          </div>
+            <div
+              ref={gridRef}
+              className="grid grid-flow-dense grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-12 lg:auto-rows-[8px]"
+            >
+              {entries.map((entry, index) => {
+                const tileLayout = galleryTileLayout(entry, index, gridContentWidth ?? undefined);
+                const tileStyle: CSSProperties = {
+                  aspectRatio: tileLayout.aspectRatio,
+                  ...(isDesktopGrid ? { gridRowEnd: `span ${tileLayout.rowSpan}` } : {}),
+                };
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => setPreviewEntry(entry)}
+                    className={`group relative min-w-0 overflow-hidden rounded-md border border-slate-200 bg-slate-900 text-left shadow-sm transition duration-200 hover:border-indigo-300 hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-slate-800 dark:hover:border-violet-400/60 ${tileLayout.className}`}
+                    style={tileStyle}
+                  >
+                    <div className="relative h-full overflow-hidden bg-slate-950">
+                      <img
+                        src={api.toApiUrl(entry.image.thumbnail_url)}
+                        alt={entry.prompt ?? entry.image.original_filename}
+                        loading="lazy"
+                        decoding="async"
+                        className="h-full w-full object-contain transition duration-300 group-hover:scale-[1.01]"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/82 via-black/5 to-transparent opacity-85 transition-opacity group-hover:opacity-95" />
+                      <div className="absolute inset-x-0 bottom-0 p-4 text-white">
+                        <div className="line-clamp-2 text-sm font-semibold leading-5">
+                          {entry.prompt ?? entry.image.original_filename}
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold text-white/70">
+                          <span>{galleryEntrySizeLabel(entry, locale)}</span>
+                          <span>{formatDateTime(entry.created_at, locale)}</span>
                         </div>
                       </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-            </section>
-          </>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
         ) : (
-          <div className="flex min-h-[calc(100svh-80px)] flex-col items-center justify-center bg-[#f3eadc] px-6 text-sm text-slate-600">
+          <div className="flex min-h-[calc(100svh-10rem)] flex-col items-center justify-center px-6 text-sm text-slate-600 dark:text-slate-400">
             <ImageIcon size={30} className="mb-4 text-indigo-500" />
-            <div className="text-5xl font-black text-slate-950">{t("gallery.title")}</div>
+            <div className="text-xl font-semibold text-slate-950 dark:text-white">{t("gallery.title")}</div>
             <div className="mt-4 text-center">{t("gallery.empty")}</div>
           </div>
         )}

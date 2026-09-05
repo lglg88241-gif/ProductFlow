@@ -87,3 +87,17 @@ class MockTextProvider(TextProvider):
             ),
         )
         return copy, "mock-copy-v2"
+
+    def generate_image_chat_advice(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        current_image_data_url: str | None = None,
+        reference_image_data_urls: list[str] | None = None,
+    ) -> tuple[str, str]:
+        last_user = next((item["content"] for item in reversed(messages) if item.get("role") == "user"), "")
+        if current_image_data_url:
+            reply = f"可以沿用当前画面继续调整：{last_user}。建议先锁定主体、版式和品牌信息，只改你指出的部分。"
+        else:
+            reply = f"这个方向可以先从主体、构图和文字层级确定下来：{last_user}。你确认方向后再生成候选。"
+        return reply, "mock-image-chat-advisor-v1"

@@ -18,7 +18,6 @@ import {
   isImageSessionGenerationTaskRetryable,
   mergeImageSessionStatusIntoDetail,
   reconcileImageSessionSelection,
-  requiresImageSessionGenerationBase,
   selectImageGenerationTaskNextPlaceholderId,
   selectSubmittedImageGenerationTaskPlaceholderId,
   shouldBlockDuplicateGenerationSubmit,
@@ -275,34 +274,6 @@ describe("image chat branching helpers", () => {
     );
   });
 
-  it("requires a generated base after any prior round or active generation task", () => {
-    expect(requiresImageSessionGenerationBase([], [])).toBe(false);
-    expect(
-      requiresImageSessionGenerationBase(
-        [
-          round({
-            id: "root-round",
-            generated_asset: asset("root-asset"),
-          }),
-        ],
-        [],
-      ),
-    ).toBe(true);
-    expect(
-      requiresImageSessionGenerationBase(
-        [],
-        [
-          task({
-            id: "queued-task",
-            status: "queued",
-          }),
-        ],
-      ),
-    ).toBe(true);
-    expect(requiresImageSessionGenerationBase([], [task({ id: "failed-task", status: "failed" })])).toBe(false);
-    expect(requiresImageSessionGenerationBase([], [task({ id: "cancelled-task", status: "cancelled" })])).toBe(false);
-  });
-
   it("finds the generated round that replaces a selected task placeholder", () => {
     const rounds = [
       round({
@@ -353,7 +324,7 @@ describe("image chat branching helpers", () => {
         historyBranches: buildImageSessionHistoryTree(rounds, tasks),
         selectedGeneratedAssetId: null,
         selectedTaskPlaceholderId: "task:task-branch:candidate:2",
-        branchBaseAssetId: null,
+        currentContextAssetId: null,
         selectedReferenceAssetIds: [],
         availableReferenceAssetIds: [],
         maxSelectedReferenceCount: 6,
@@ -362,7 +333,7 @@ describe("image chat branching helpers", () => {
     ).toMatchObject({
       selectedGeneratedAssetId: "branch-asset-2",
       selectedTaskPlaceholderId: null,
-      branchBaseAssetId: "branch-asset-2",
+      currentContextAssetId: "branch-asset-2",
     });
   });
 
@@ -379,7 +350,7 @@ describe("image chat branching helpers", () => {
         historyBranches: buildImageSessionHistoryTree(rounds, []),
         selectedGeneratedAssetId: "gone",
         selectedTaskPlaceholderId: null,
-        branchBaseAssetId: "gone",
+        currentContextAssetId: "gone",
         selectedReferenceAssetIds: [],
         availableReferenceAssetIds: [],
         maxSelectedReferenceCount: 6,
@@ -388,7 +359,7 @@ describe("image chat branching helpers", () => {
     ).toMatchObject({
       selectedGeneratedAssetId: "asset-2",
       selectedTaskPlaceholderId: null,
-      branchBaseAssetId: "asset-2",
+      currentContextAssetId: "asset-2",
     });
   });
 
@@ -399,7 +370,7 @@ describe("image chat branching helpers", () => {
       historyBranches: [],
       selectedGeneratedAssetId: null,
       selectedTaskPlaceholderId: null,
-      branchBaseAssetId: null,
+      currentContextAssetId: null,
       selectedReferenceAssetIds: ["ref-1", "gone", "ref-2", "ref-1", "ref-3"],
       availableReferenceAssetIds: ["ref-1", "ref-2", "ref-3"],
       maxSelectedReferenceCount: 2,
@@ -419,7 +390,7 @@ describe("image chat branching helpers", () => {
         historyBranches: buildImageSessionHistoryTree(rounds, []),
         selectedGeneratedAssetId: null,
         selectedTaskPlaceholderId: null,
-        branchBaseAssetId: null,
+        currentContextAssetId: null,
         selectedReferenceAssetIds: [],
         availableReferenceAssetIds: [],
         maxSelectedReferenceCount: 6,
@@ -428,7 +399,7 @@ describe("image chat branching helpers", () => {
     ).toMatchObject({
       selectedGeneratedAssetId: "asset-1",
       selectedTaskPlaceholderId: null,
-      branchBaseAssetId: "asset-1",
+      currentContextAssetId: "asset-1",
       pendingGeneratedRoundCount: null,
       generatedRoundCompleted: true,
     });

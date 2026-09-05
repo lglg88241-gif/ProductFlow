@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from productflow_backend.application.moments_poster_templates import MOMENTS_POSTER_TEMPLATE_DESIGNS
 from productflow_backend.domain.enums import WorkflowNodeType
 from productflow_backend.domain.errors import BusinessValidationError
 from productflow_backend.domain.workflow_rules import WorkflowRuleEdge, WorkflowRuleNode, topological_node_ids
@@ -39,6 +40,9 @@ class CanvasTemplateScenario(StrEnum):
     CAMPAIGN_PROMOTION = "campaign_promotion"
     SHORT_VIDEO_COVER = "short_video_cover"
     WHITE_BACKGROUND = "white_background"
+    MOMENTS_BEAUTY_CLEAN = "moments_beauty_clean"
+    MOMENTS_BEAUTY_NEON = "moments_beauty_neon"
+    MOMENTS_BEAUTY_LUXE = "moments_beauty_luxe"
 
 
 class CanvasTemplateScenarioMetadata(BaseModel):
@@ -635,6 +639,29 @@ _SHORT_VIDEO_COVER_IMAGE = "Create a vertical short-video cover with a prominent
 
 _WHITE_BACKGROUND_COPY = "Describe subject, angle, and supplied specs for a white-background image. No promo copy."
 _WHITE_BACKGROUND_IMAGE = "Create a white-background product image with clear edges and realistic material."
+
+_MOMENTS_COPY = (
+    "整理用户提供的品牌、产品或活动、价格、日期、主标题、副标题、卖点、补充说明和原始文案，形成完整的朋友圈海报信息层级。"
+    "只使用明确提供的事实，不编造折扣、日期、规格、认证、疗效或减重承诺；保留品牌、人物身份、产品包装和单位。"
+)
+_MOMENTS_IMAGE_POLICY = (
+    "制作 1024x1536 竖版朋友圈海报，并从空白画布完整重构画面。"
+    "样板只提供构图节奏、字体比例、配色、材质和光效参考；不得缩小、贴入、套边框、拼贴或复用样板中的原文、人物、Logo、品牌和商品。"
+    "用户上传的主视觉、人物、产品和品牌素材才是身份与事实来源；只呈现明确提供的文案，不新增疗效、减重数字、折扣、日期、认证或虚构联系方式。"
+    "画面不得包含二维码、条形码、应用界面按钮或操作按钮文案。"
+)
+_MOMENTS_CLEAN_IMAGE = (
+    f"{_MOMENTS_IMAGE_POLICY} "
+    f"{MOMENTS_POSTER_TEMPLATE_DESIGNS['moments-beauty-clean-v1'].style_spec}"
+)
+_MOMENTS_NEON_IMAGE = (
+    f"{_MOMENTS_IMAGE_POLICY} "
+    f"{MOMENTS_POSTER_TEMPLATE_DESIGNS['moments-beauty-neon-v1'].style_spec}"
+)
+_MOMENTS_LUXE_IMAGE = (
+    f"{_MOMENTS_IMAGE_POLICY} "
+    f"{MOMENTS_POSTER_TEMPLATE_DESIGNS['moments-beauty-luxe-v1'].style_spec}"
+)
 
 
 BUILTIN_CANVAS_TEMPLATES: tuple[CanvasTemplate, ...] = (
@@ -2163,6 +2190,257 @@ BUILTIN_CANVAS_TEMPLATES: tuple[CanvasTemplate, ...] = (
         suggested_connections=(
             _suggest("product_reference", "white_image", "主体参考图用于保持外观、角度和边缘细节。"),
             _suggest("clean_copy", "shadow_image", "白底要求继续生成带轻阴影的基础陈列版本。"),
+        ),
+    ),
+    _full_canvas_template(
+        key="moments-beauty-clean-v1",
+        title="深墨绿模特大字",
+        description="深墨绿与黑色满版、模特主视觉、荧光笔刷英文和超大中文标题。",
+        scenario=_scenario(
+            CanvasTemplateScenario.MOMENTS_BEAUTY_CLEAN,
+            title="朋友圈美容海报：深墨绿模特大字",
+            description="用样板的杂志式模特构图和大字节奏，重做不同品牌与文案的全新海报。",
+            ecommerce_stage="moments",
+            tags=("moments", "beauty", "clean", "portrait"),
+        ),
+        nodes=(
+            _node(
+                "style_reference",
+                WorkflowNodeType.REFERENCE_IMAGE,
+                title="样板与背景参考",
+                x=48,
+                y=68,
+                config_json={"role": "style", "label": "样板与背景参考"},
+                reference_input_hint="上传喜欢的样板构图、背景或配色参考。",
+            ),
+            _node("product", WorkflowNodeType.PRODUCT_CONTEXT, title="项目与完整文案", x=48, y=256),
+            _node(
+                "copy",
+                WorkflowNodeType.COPY_GENERATION,
+                title="完整文案整理",
+                x=440,
+                y=136,
+                instruction_seed=_MOMENTS_COPY,
+            ),
+            _node(
+                "image",
+                WorkflowNodeType.IMAGE_GENERATION,
+                title="生成清透海报",
+                x=824,
+                y=136,
+                config_json={"tool_options": {"quality": "high"}},
+                instruction_seed=_MOMENTS_CLEAN_IMAGE,
+                size="1024x1536",
+            ),
+            _node(
+                "output",
+                WorkflowNodeType.REFERENCE_IMAGE,
+                title="朋友圈成品",
+                x=1208,
+                y=136,
+                config_json={"role": "output", "label": "朋友圈成品"},
+                output_slot_label="朋友圈成品",
+            ),
+        ),
+        edges=(
+            ("style_reference", "copy"),
+            ("product", "copy"),
+            ("style_reference", "image"),
+            ("product", "image"),
+            ("copy", "image"),
+            ("image", "output"),
+        ),
+        output_slots=(
+            _output_slot("output", "朋友圈成品", "清透白绿竖版海报成品。"),
+        ),
+        reference_input_hints=(
+            _reference_hint(
+                "style_reference",
+                role="style",
+                label="样板与背景参考",
+                description="上传样板、背景、构图或配色参考。",
+            ),
+        ),
+        suggested_connections=(
+            _suggest("style_reference", "image", "样板参考约束构图、留白和配色。"),
+            _suggest("copy", "image", "完整文案层级进入最终海报生成。"),
+        ),
+    ),
+    _full_canvas_template(
+        key="moments-beauty-neon-v1",
+        title="黑粉高冲击爆字",
+        description="纯黑满版、超大粉色中文爆字、荧光绿英文叠排和强留白。",
+        scenario=_scenario(
+            CanvasTemplateScenario.MOMENTS_BEAUTY_NEON,
+            title="朋友圈美容海报：黑粉高冲击爆字",
+            description="用样板的爆字比例和留白关系，重做不同项目的全新排版海报。",
+            ecommerce_stage="moments",
+            tags=("moments", "beauty", "neon", "portrait"),
+        ),
+        nodes=(
+            _node("product", WorkflowNodeType.PRODUCT_CONTEXT, title="项目与完整文案", x=48, y=164),
+            _node(
+                "style_reference",
+                WorkflowNodeType.REFERENCE_IMAGE,
+                title="霓虹样板参考",
+                x=48,
+                y=380,
+                config_json={"role": "style", "label": "霓虹样板参考"},
+                reference_input_hint="上传深色美容、塑形或活动海报样板。",
+            ),
+            _node(
+                "fact_copy",
+                WorkflowNodeType.COPY_GENERATION,
+                title="事实与卖点整理",
+                x=436,
+                y=84,
+                instruction_seed=_MOMENTS_COPY,
+            ),
+            _node(
+                "layout_copy",
+                WorkflowNodeType.COPY_GENERATION,
+                title="标题与视觉层级",
+                x=436,
+                y=286,
+                instruction_seed=(
+                    "基于已整理的事实，为朋友圈竖版海报规划主标题、副标题、价格或日期、1-4 条卖点和补充说明的视觉层级。"
+                    "不添加用户未提供的内容，不生成按钮文案。"
+                ),
+            ),
+            _node(
+                "image",
+                WorkflowNodeType.IMAGE_GENERATION,
+                title="生成霓虹海报",
+                x=824,
+                y=172,
+                config_json={"tool_options": {"quality": "high"}},
+                instruction_seed=_MOMENTS_NEON_IMAGE,
+                size="1024x1536",
+            ),
+            _node(
+                "output",
+                WorkflowNodeType.REFERENCE_IMAGE,
+                title="朋友圈成品",
+                x=1212,
+                y=172,
+                config_json={"role": "output", "label": "朋友圈成品"},
+                output_slot_label="朋友圈成品",
+            ),
+        ),
+        edges=(
+            ("product", "fact_copy"),
+            ("style_reference", "fact_copy"),
+            ("fact_copy", "layout_copy"),
+            ("product", "image"),
+            ("style_reference", "image"),
+            ("layout_copy", "image"),
+            ("image", "output"),
+        ),
+        output_slots=(
+            _output_slot("output", "朋友圈成品", "紫黑霓虹竖版海报成品。"),
+        ),
+        reference_input_hints=(
+            _reference_hint(
+                "style_reference",
+                role="style",
+                label="霓虹样板参考",
+                description="上传深色样板、灯光氛围或排版参考。",
+            ),
+        ),
+        suggested_connections=(
+            _suggest("fact_copy", "layout_copy", "先固定事实，再规划标题与视觉层级。"),
+            _suggest("layout_copy", "image", "层级规划控制霓虹海报的信息密度。"),
+        ),
+    ),
+    _full_canvas_template(
+        key="moments-beauty-luxe-v1",
+        title="紫黑高级活动战报",
+        description="紫黑舞台光感、书法与黑体混排、权益信息带和活动战报层级。",
+        scenario=_scenario(
+            CanvasTemplateScenario.MOMENTS_BEAUTY_LUXE,
+            title="朋友圈美容海报：紫黑高级活动战报",
+            description="用样板的战报式信息层级和紫黑光效，重做不同品牌与活动文案。",
+            ecommerce_stage="moments",
+            tags=("moments", "beauty", "luxe", "portrait"),
+        ),
+        nodes=(
+            _node("product", WorkflowNodeType.PRODUCT_CONTEXT, title="项目与完整文案", x=48, y=188),
+            _node(
+                "portrait_reference",
+                WorkflowNodeType.REFERENCE_IMAGE,
+                title="人物与姿态参考",
+                x=48,
+                y=420,
+                config_json={"role": "person", "label": "人物与姿态参考"},
+                reference_input_hint="上传人物、姿态、服装或肤色光影参考。",
+            ),
+            _node(
+                "brand_reference",
+                WorkflowNodeType.REFERENCE_IMAGE,
+                title="产品与品牌参考",
+                x=48,
+                y=652,
+                config_json={"role": "brand", "label": "产品与品牌参考"},
+                reference_input_hint="上传产品包装、Logo、门店或品牌视觉参考。",
+            ),
+            _node(
+                "copy",
+                WorkflowNodeType.COPY_GENERATION,
+                title="服务权益与层级",
+                x=448,
+                y=286,
+                instruction_seed=_MOMENTS_COPY,
+            ),
+            _node(
+                "image",
+                WorkflowNodeType.IMAGE_GENERATION,
+                title="生成轻奢海报",
+                x=848,
+                y=286,
+                config_json={"tool_options": {"quality": "high"}},
+                instruction_seed=_MOMENTS_LUXE_IMAGE,
+                size="1024x1536",
+            ),
+            _node(
+                "output",
+                WorkflowNodeType.REFERENCE_IMAGE,
+                title="朋友圈成品",
+                x=1248,
+                y=286,
+                config_json={"role": "output", "label": "朋友圈成品"},
+                output_slot_label="朋友圈成品",
+            ),
+        ),
+        edges=(
+            ("product", "copy"),
+            ("portrait_reference", "copy"),
+            ("brand_reference", "copy"),
+            ("product", "image"),
+            ("portrait_reference", "image"),
+            ("brand_reference", "image"),
+            ("copy", "image"),
+            ("image", "output"),
+        ),
+        output_slots=(
+            _output_slot("output", "朋友圈成品", "香槟轻奢竖版海报成品。"),
+        ),
+        reference_input_hints=(
+            _reference_hint(
+                "portrait_reference",
+                role="person",
+                label="人物与姿态参考",
+                description="上传人物、姿态、服装或光影参考。",
+            ),
+            _reference_hint(
+                "brand_reference",
+                role="brand",
+                label="产品与品牌参考",
+                description="上传产品包装、Logo、门店或品牌视觉参考。",
+            ),
+        ),
+        suggested_connections=(
+            _suggest("portrait_reference", "image", "人物参考用于保持身份、姿态和光影方向。"),
+            _suggest("brand_reference", "image", "品牌参考用于保持包装、Logo 和品牌气质。"),
         ),
     ),
 )

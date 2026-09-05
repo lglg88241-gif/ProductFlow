@@ -891,7 +891,7 @@ def test_image_generation_without_copy_link_uses_image_edit_prompt_mode(
     assert captured_inputs[0].copy_prompt_mode == "image_edit"
     assert captured_inputs[0].instruction and "暖色露营场景" in captured_inputs[0].instruction
 
-def test_image_session_openai_responses_uses_explicit_branch_context(
+def test_image_session_rejects_openai_responses_provider(
     configured_env: Path,
     monkeypatch,
 ) -> None:
@@ -903,50 +903,6 @@ def test_image_session_openai_responses_uses_explicit_branch_context(
     monkeypatch.setenv("IMAGE_GENERATE_MODEL", "gpt-5.4")
     get_settings.cache_clear()
 
-    calls: list[dict] = []
-    client_kwargs: list[dict] = []
-    encoded_result = _make_demo_image_data_url().split(",", maxsplit=1)[1]
-
-    class DummyImageGenerationCall:
-        type = "image_generation_call"
-
-        def __init__(self, index: int) -> None:
-            self.id = f"ig_{index}"
-            self.result = encoded_result
-            self.revised_prompt = f"revised prompt {index}"
-
-        def model_dump(self, *, mode: str, exclude_none: bool) -> dict[str, str]:
-            return {
-                "id": self.id,
-                "type": self.type,
-                "status": "completed",
-                "revised_prompt": self.revised_prompt,
-                "result": self.result,
-            }
-
-    class DummyResponse:
-        def __init__(self, index: int) -> None:
-            self.id = f"resp_{index}"
-            self.output = [DummyImageGenerationCall(index)]
-
-        def model_dump(self, *, mode: str, exclude_none: bool) -> dict:
-            return {
-                "id": self.id,
-                "output": [output.model_dump(mode=mode, exclude_none=exclude_none) for output in self.output],
-            }
-
-    class DummyResponses:
-        def create(self, **kwargs):
-            calls.append(kwargs)
-            return DummyResponse(len(calls))
-
-    class DummyOpenAI:
-        def __init__(self, **kwargs) -> None:
-            client_kwargs.append(kwargs)
-            self.responses = DummyResponses()
-
-    monkeypatch.setattr("productflow_backend.infrastructure.image.responses_provider.OpenAI", DummyOpenAI)
-
     app = create_app()
     client = TestClient(app)
     _login(client)
@@ -955,61 +911,12 @@ def test_image_session_openai_responses_uses_explicit_branch_context(
     assert created.status_code == 201
     session_id = created.json()["id"]
 
-    upload = client.post(
-        f"/api/image-sessions/{session_id}/reference-images",
-        files={"reference_images": ("sample.png", _make_demo_image_bytes(), "image/png")},
-    )
-    assert upload.status_code == 200
-    reference_id = next(asset["id"] for asset in upload.json()["assets"] if asset["kind"] == "reference_upload")
-
-    first = client.post(
+    response = client.post(
         f"/api/image-sessions/{session_id}/generate",
         json={"prompt": "生成日漫风商品场景", "size": "1024x1024"},
     )
-    assert first.status_code == 202
-    first_round = first.json()["rounds"][-1]
-    assert first_round["provider_name"] == "openai-responses"
-    assert first_round["provider_response_id"] == "resp_1"
-    assert first_round["previous_response_id"] is None
-    assert first_round["image_generation_call_id"] == "ig_1"
-    first_asset_id = first_round["generated_asset"]["id"]
-
-    second_without_base = client.post(
-        f"/api/image-sessions/{session_id}/generate",
-        json={"prompt": "保持主体，把背景改成晴天街角", "size": "1024x1024"},
-    )
-    assert second_without_base.status_code == 400
-    assert second_without_base.json()["detail"] == "后续生图必须选择一张本会话已生成图片作为基图"
-
-    branched = client.post(
-        f"/api/image-sessions/{session_id}/generate",
-        json={
-            "prompt": "只从第一张和手动选择的参考图继续",
-            "size": "1024x1024",
-            "base_asset_id": first_asset_id,
-            "selected_reference_asset_ids": [reference_id],
-        },
-    )
-    assert branched.status_code == 202
-    branched_round = branched.json()["rounds"][-1]
-    assert branched_round["provider_response_id"] == "resp_2"
-    assert branched_round["previous_response_id"] is None
-    assert branched_round["base_asset_id"] == first_asset_id
-    assert branched_round["selected_reference_asset_ids"] == [reference_id]
-
-    assert client_kwargs[0] == {"api_key": "demo-api-key", "base_url": "https://example.test/v1"}
-    assert calls[0]["model"] == "gpt-5.4"
-    assert calls[0]["tools"] == [{"type": "image_generation", "size": "1024x1024"}]
-    assert "previous_response_id" not in calls[0]
-    assert "previous_response_id" not in calls[1]
-    assert isinstance(calls[0]["input"], str)
-    branch_content = calls[1]["input"][0]["content"]
-    assert branch_content[0]["type"] == "input_text"
-    branch_images = [item for item in branch_content if item["type"] == "input_image"]
-    assert len(branch_images) == 2
-    assert all(item["image_url"].startswith("data:image/png;base64,") for item in branch_images)
-    assert "/images/generations" not in str(calls)
-    assert "/images/edits" not in str(calls)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "图片共创会话需要将图片供应商改为 openai_images"
 
 def test_openai_responses_poster_provider_uses_image_generation_tool(
     configured_env: Path,
@@ -1692,11 +1599,11 @@ def test_openai_images_provider_factory_and_client_generate_payload(
     assert result.model_name == "gpt-image-1"
     assert result.provider_request_json == {
         "model": "gpt-image-1",
-        "prompt": "生成商品图",
         "size": "1024x1024",
         "n": 1,
         "quality": "high",
         "style": "vivid",
+        "prompt_length": 5,
     }
     assert result.provider_output_json == {}
 
@@ -1856,7 +1763,7 @@ def test_openai_images_client_retries_generate_without_optional_fields(
     assert "unsupported optional field" not in str(result.provider_output_json)
 
 
-def test_openai_images_client_edit_sends_multiple_images_and_falls_back_to_base_image(
+def test_openai_images_client_edit_preserves_all_images_on_provider_failure(
     configured_env: Path,
     monkeypatch,
 ) -> None:
@@ -1867,14 +1774,10 @@ def test_openai_images_client_edit_sends_multiple_images_and_falls_back_to_base_
     get_settings.cache_clear()
 
     calls: list[dict] = []
-    encoded_result = _make_demo_image_data_url().split(",", maxsplit=1)[1]
-
     class DummyImages:
         def edit(self, **kwargs):
             calls.append(kwargs)
-            if len(calls) == 1:
-                raise RuntimeError("multiple files are not supported")
-            return DummyImagesAPIResponse(encoded_result)
+            raise RuntimeError("multiple files are not supported")
 
     class DummyOpenAI:
         def __init__(self, **kwargs) -> None:
@@ -1884,39 +1787,20 @@ def test_openai_images_client_edit_sends_multiple_images_and_falls_back_to_base_
 
     from productflow_backend.infrastructure.image.images_provider import ImagesReferenceImage, OpenAIImagesClient
 
-    result = OpenAIImagesClient().edit(
-        image=[
-            ImagesReferenceImage(_make_demo_image_bytes(), "image/png", "base.png"),
-            ImagesReferenceImage(_make_demo_image_bytes(), "image/png", "ref.png"),
-        ],
-        prompt="改图",
-        size="1024x1024",
-    )[0]
+    with pytest.raises(RuntimeError, match="无法处理当前多图编辑输入"):
+        OpenAIImagesClient().edit(
+            image=[
+                ImagesReferenceImage(_make_demo_image_bytes(), "image/png", "base.png"),
+                ImagesReferenceImage(_make_demo_image_bytes(), "image/png", "ref.png"),
+            ],
+            prompt="改图",
+            size="1024x1024",
+        )
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert isinstance(calls[0]["image"], list)
     assert [image.name for image in calls[0]["image"]] == ["base.png", "ref.png"]
     assert calls[0]["quality"] == "high"
-    assert calls[1]["image"].name == "base.png"
-    assert "quality" not in calls[1]
-    assert result.provider_request_json == {
-        "model": "gpt-image-1",
-        "prompt": "改图",
-        "size": "1024x1024",
-        "n": 1,
-        "image_count": 1,
-        "images": [{"filename": "base.png", "mime_type": "image/png"}],
-        "has_mask": False,
-    }
-    assert result.provider_output_json["_productflow"] == {
-        "notes": [
-            {"kind": "fallback", "message": "供应商不支持部分可选参数，已按基础参数完成。"},
-            {"kind": "multi_image_fallback", "message": "供应商不支持多张编辑输入，已仅使用基图完成。"},
-        ],
-        "requested_image_count": 2,
-        "effective_image_count": 1,
-    }
-    assert "multiple files" not in str(result.provider_output_json)
 
 
 def test_openai_images_client_reports_missing_output_and_sanitizes_failures(
@@ -2226,3 +2110,82 @@ def test_openai_responses_image_client_reports_completed_text_without_image(
         OpenAIResponsesImageClient().generate_image(prompt="只返回文字", size="1024x1024")
 
     assert str(error.value) == "图片供应商已完成请求，但返回的是文字回复，没有返回图片结果"
+
+
+def test_openai_text_advisor_uses_copy_model_bounded_context_and_ordered_images(
+    configured_env: Path,
+    monkeypatch,
+) -> None:
+    from productflow_backend.infrastructure.provider_config import ResolvedTextProviderConfig
+    from productflow_backend.infrastructure.text.openai_provider import OpenAITextProvider
+
+    calls: list[dict] = []
+
+    class DummyResponses:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(output_text="已记录创作方向")
+
+    class DummyOpenAI:
+        def __init__(self, **kwargs) -> None:
+            self.responses = DummyResponses()
+
+    monkeypatch.setattr("productflow_backend.infrastructure.text.openai_provider.OpenAI", DummyOpenAI)
+    provider = OpenAITextProvider(
+        ResolvedTextProviderConfig(
+            provider_kind="openai",
+            brief_model="brief-model",
+            copy_model="advisor-copy-model",
+            api_key="demo-api-key",
+        )
+    )
+
+    messages: list[dict[str, str]] = []
+    for index in range(20):
+        messages.append(
+            {
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": f"discussion-{index}",
+                "context_kind": "discussion",
+            }
+        )
+    for index in range(20):
+        messages.append(
+            {
+                "role": "user" if index % 2 == 0 else "assistant",
+                "content": f"generation-{index}",
+                "context_kind": "generation_round",
+            }
+        )
+
+    advice, model_name = provider.generate_image_chat_advice(
+        messages,
+        current_image_data_url="data:image/png;base64,current",
+        reference_image_data_urls=["data:image/png;base64:reference-1", "data:image/png;base64:reference-2"],
+    )
+
+    assert advice == "已记录创作方向"
+    assert model_name == "advisor-copy-model"
+    assert len(calls) == 1
+    request = calls[0]
+    assert request["model"] == "advisor-copy-model"
+    assert "只回复讨论内容，不生成图片" in request["instructions"]
+    content = request["input"][0]["content"]
+    generation_text = [
+        item["text"] for item in content if item["type"] == "input_text" and "generation-" in item["text"]
+    ]
+    discussion_text = [
+        item["text"] for item in content if item["type"] == "input_text" and "discussion-" in item["text"]
+    ]
+    assert len(generation_text) == 16
+    assert len(discussion_text) == 12
+    assert "generation-0" not in " ".join(generation_text)
+    assert "generation-19" in " ".join(generation_text)
+    assert "discussion-0" not in " ".join(discussion_text)
+    assert "discussion-19" in " ".join(discussion_text)
+    image_inputs = [item["image_url"] for item in content if item["type"] == "input_image"]
+    assert image_inputs == [
+        "data:image/png;base64,current",
+        "data:image/png;base64:reference-1",
+        "data:image/png;base64:reference-2",
+    ]

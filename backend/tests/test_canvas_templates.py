@@ -95,6 +95,9 @@ def test_builtin_canvas_template_catalog_covers_required_ecommerce_scenarios() -
         CanvasTemplateScenario.CAMPAIGN_PROMOTION,
         CanvasTemplateScenario.SHORT_VIDEO_COVER,
         CanvasTemplateScenario.WHITE_BACKGROUND,
+        CanvasTemplateScenario.MOMENTS_BEAUTY_CLEAN,
+        CanvasTemplateScenario.MOMENTS_BEAUTY_NEON,
+        CanvasTemplateScenario.MOMENTS_BEAUTY_LUXE,
     }
     assert {template.kind for template in templates} == {"full_canvas"}
 
@@ -121,7 +124,34 @@ def test_builtin_canvas_template_catalog_documents_02_shipped_scenarios() -> Non
         "ecommerce-campaign-promotion-image-v1": CanvasTemplateScenario.CAMPAIGN_PROMOTION,
         "ecommerce-short-video-cover-v1": CanvasTemplateScenario.SHORT_VIDEO_COVER,
         "ecommerce-white-background-image-v1": CanvasTemplateScenario.WHITE_BACKGROUND,
+        "moments-beauty-clean-v1": CanvasTemplateScenario.MOMENTS_BEAUTY_CLEAN,
+        "moments-beauty-neon-v1": CanvasTemplateScenario.MOMENTS_BEAUTY_NEON,
+        "moments-beauty-luxe-v1": CanvasTemplateScenario.MOMENTS_BEAUTY_LUXE,
     }
+
+
+def test_moments_beauty_templates_are_vertical_and_prompt_safe() -> None:
+    templates = {
+        template.key: template
+        for template in list_builtin_canvas_templates()
+        if template.key.startswith("moments-")
+    }
+
+    assert set(templates) == {
+        "moments-beauty-clean-v1",
+        "moments-beauty-neon-v1",
+        "moments-beauty-luxe-v1",
+    }
+    for template in templates.values():
+        image_nodes = [node for node in template.nodes if node.node_type == WorkflowNodeType.IMAGE_GENERATION]
+        instructions = "\n".join(node.instruction_seed or "" for node in image_nodes)
+
+        assert image_nodes
+        assert all(node.size == "1024x1536" for node in image_nodes)
+        assert "不得包含二维码" in instructions
+        assert "操作按钮文案" in instructions
+        assert "不新增疗效" in instructions
+        assert template.output_slots
 
 
 def test_full_canvas_templates_have_distinct_graph_shapes() -> None:

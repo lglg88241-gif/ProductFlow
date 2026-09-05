@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Drawer } from "vaul";
 import {
@@ -7,14 +7,12 @@ import {
   Download,
   GalleryHorizontalEnd,
   History,
-  Layers3,
   Loader2,
   Menu,
   Pencil,
   Plus,
   Save,
   Settings,
-  Sparkles,
   X,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
@@ -35,6 +33,7 @@ import { imageRoundSizeLabel, placeholderStatusClass, placeholderStatusLabel } f
 import { ImageChatHistoryPanel } from "./image-chat/ImageChatHistoryPanel";
 import { ImageChatMainStage } from "./image-chat/ImageChatMainStage";
 import { ImageChatSessionList } from "./image-chat/ImageChatSessionList";
+import { ImageChatComposer } from "./image-chat/ImageChatComposer";
 import { ProductAssociationPanel, SessionReferencePanel } from "./image-chat/ReferencePanels";
 import {
   HISTORY_PANEL_DEFAULT_HEIGHT,
@@ -65,7 +64,6 @@ import {
   mergeImageSessionStatusIntoDetail,
   pruneSelectedReferenceIds,
   reconcileImageSessionSelection,
-  requiresImageSessionGenerationBase,
   selectImageGenerationTaskNextPlaceholderId,
   selectSubmittedImageGenerationTaskPlaceholderId,
   shouldBlockDuplicateGenerationSubmit,
@@ -81,7 +79,9 @@ import type {
   ImageSessionRound,
   ImageSessionGenerationTask,
   ImageSessionListResponse,
+  ImageSessionMessage,
   ImageSessionStatus,
+  ImageToolOptionKey,
   ImageToolOptions,
 } from "../lib/types";
 
@@ -91,6 +91,13 @@ const DESKTOP_RESIZABLE_LAYOUT_QUERY = "(min-width: 1024px)";
 const PRODUCT_PICKER_LIST_STALE_TIME_MS = 60_000;
 const RUNTIME_CONFIG_STALE_TIME_MS = 5 * 60_000;
 const IMAGE_CHAT_GENERATION_COUNT_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+const IMAGE_CHAT_SUPPORTED_TOOL_FIELDS = new Set<ImageToolOptionKey>([
+  "quality",
+  "output_format",
+  "output_compression",
+  "background",
+  "moderation",
+]);
 const IMAGE_CHAT_ROUTE_STATE_SCOPE = "standalone";
 
 type ImageChatResizeTarget = "left" | "right" | "history";
@@ -99,7 +106,7 @@ interface ImageChatRouteState {
   selectedSessionId: string | null;
   selectedGeneratedAssetId: string | null;
   selectedTaskPlaceholderId: string | null;
-  branchBaseAssetId: string | null;
+  currentContextAssetId: string | null;
   selectedReferenceAssetIds: string[];
   generationCount: number;
   draft: string;
@@ -160,19 +167,19 @@ export function ImageChatPage() {
   const [selectedTaskPlaceholderId, setSelectedTaskPlaceholderId] = useState<string | null>(
     () => readImageChatRouteState(routeStateScope)?.selectedTaskPlaceholderId ?? null,
   );
-  const [branchBaseAssetId, setBranchBaseAssetId] = useState<string | null>(
-    () => readImageChatRouteState(routeStateScope)?.branchBaseAssetId ?? null,
+  const [currentContextAssetId, setCurrentContextAssetId] = useState<string | null>(
+    () => readImageChatRouteState(routeStateScope)?.currentContextAssetId ?? null,
   );
   const [selectedReferenceAssetIds, setSelectedReferenceAssetIds] = useState<string[]>(
     () => readImageChatRouteState(routeStateScope)?.selectedReferenceAssetIds ?? [],
   );
   const [generationCount, setGenerationCount] = useState(
-    () => readImageChatRouteState(routeStateScope)?.generationCount ?? 1,
+    () => readImageChatRouteState(routeStateScope)?.generationCount ?? 2,
   );
   const [draft, setDraft] = useState(() => readImageChatRouteState(routeStateScope)?.draft ?? "");
   const [size, setSize] = useState(() => readImageChatRouteState(routeStateScope)?.size ?? "1024x1024");
   const [toolOptions, setToolOptions] = useState<ImageToolOptions>(
-    () => readImageChatRouteState(routeStateScope)?.toolOptions ?? {},
+    () => readImageChatRouteState(routeStateScope)?.toolOptions ?? { quality: "medium" },
   );
   const [settingsTab, setSettingsTab] = useState<ImageGenerationSettingsTab>(
     () => readImageChatRouteState(routeStateScope)?.settingsTab ?? "basic",
@@ -210,7 +217,7 @@ export function ImageChatPage() {
       selectedSessionId,
       selectedGeneratedAssetId,
       selectedTaskPlaceholderId,
-      branchBaseAssetId,
+      currentContextAssetId,
       selectedReferenceAssetIds,
       generationCount,
       draft,
@@ -220,7 +227,7 @@ export function ImageChatPage() {
       targetProductId,
     });
   }, [
-    branchBaseAssetId,
+    currentContextAssetId,
     draft,
     generationCount,
     routeStateScope,
@@ -289,6 +296,10 @@ export function ImageChatPage() {
   const imageGenerationMaxDimension =
     runtimeConfigQuery.data?.image_generation_max_dimension ?? DEFAULT_IMAGE_GENERATION_MAX_DIMENSION;
   const imageToolAllowedFields = runtimeConfigQuery.data?.image_tool_allowed_fields ?? DEFAULT_IMAGE_TOOL_ALLOWED_FIELDS;
+  const imageChatToolAllowedFields = useMemo(
+    () => imageToolAllowedFields.filter((field) => IMAGE_CHAT_SUPPORTED_TOOL_FIELDS.has(field)),
+    [imageToolAllowedFields],
+  );
   const deletionEnabled = runtimeConfigQuery.data?.deletion_enabled ?? false;
   const sizeOptions = useMemo(
     () => buildImageSizeOptions(imageGenerationMaxDimension),
@@ -298,7 +309,7 @@ export function ImageChatPage() {
   function resetImageSessionSelection() {
     setSelectedGeneratedAssetId(null);
     setSelectedTaskPlaceholderId(null);
-    setBranchBaseAssetId(null);
+    setCurrentContextAssetId(null);
     setSelectedReferenceAssetIds([]);
   }
 
@@ -359,15 +370,13 @@ export function ImageChatPage() {
     () => buildImageSessionHistoryTree(imageSession?.rounds ?? [], imageSession?.generation_tasks ?? []),
     [imageSession],
   );
-  const requiresGenerationBase = requiresImageSessionGenerationBase(
-    imageSession?.rounds ?? [],
-    imageSession?.generation_tasks ?? [],
-  );
   const sessionReferenceAssets = useMemo(() => getSessionReferenceAssets(imageSession), [imageSession]);
-  const maxSelectedReferenceCount = branchBaseAssetId ? MAX_BRANCH_CONTEXT_IMAGES - 1 : MAX_BRANCH_CONTEXT_IMAGES;
+  // The selected candidate is the next round's context. When no candidate is selected,
+  // the server will use the latest generated asset automatically.
+  const maxSelectedReferenceCount = currentContextAssetId ? MAX_BRANCH_CONTEXT_IMAGES - 1 : MAX_BRANCH_CONTEXT_IMAGES;
   const compactedToolOptions = useMemo(
-    () => compactImageToolOptions(toolOptions, imageToolAllowedFields),
-    [imageToolAllowedFields, toolOptions],
+    () => compactImageToolOptions(toolOptions, imageChatToolAllowedFields),
+    [imageChatToolAllowedFields, toolOptions],
   );
   const submitGenerationCount = effectiveImageGenerationSubmitCount(generationCount, compactedToolOptions);
   const hasActiveGenerationTask = imageSession?.generation_tasks.some(isImageSessionGenerationTaskActive) ?? false;
@@ -409,7 +418,7 @@ export function ImageChatPage() {
       historyBranches,
       selectedGeneratedAssetId,
       selectedTaskPlaceholderId,
-      branchBaseAssetId,
+      currentContextAssetId,
       selectedReferenceAssetIds,
       availableReferenceAssetIds: sessionReferenceAssets.map((asset) => asset.id),
       maxSelectedReferenceCount,
@@ -422,8 +431,8 @@ export function ImageChatPage() {
     if (reconciled.selectedTaskPlaceholderId !== selectedTaskPlaceholderId) {
       setSelectedTaskPlaceholderId(reconciled.selectedTaskPlaceholderId);
     }
-    if (reconciled.branchBaseAssetId !== branchBaseAssetId) {
-      setBranchBaseAssetId(reconciled.branchBaseAssetId);
+    if (reconciled.currentContextAssetId !== currentContextAssetId) {
+      setCurrentContextAssetId(reconciled.currentContextAssetId);
     }
     if (reconciled.selectedReferenceAssetIds !== selectedReferenceAssetIds) {
       setSelectedReferenceAssetIds(reconciled.selectedReferenceAssetIds);
@@ -435,7 +444,7 @@ export function ImageChatPage() {
       setErrorMessage("");
     }
   }, [
-    branchBaseAssetId,
+    currentContextAssetId,
     historyBranches,
     imageSession,
     maxSelectedReferenceCount,
@@ -463,15 +472,6 @@ export function ImageChatPage() {
   );
   const activePreviewRound =
     previewRound && imageSession?.rounds.some((round) => round.id === previewRound.id) ? previewRound : null;
-
-  const branchBaseRound = useMemo(() => {
-    if (!imageSession?.rounds.length || !branchBaseAssetId) {
-      return null;
-    }
-    return imageSession.rounds.find((round) => round.generated_asset.id === branchBaseAssetId) ?? null;
-  }, [branchBaseAssetId, imageSession]);
-  const baseRequirementMessage =
-    requiresGenerationBase && !branchBaseRound ? t("chat.baseRequired") : "";
 
   const logoutMutation = useMutation({
     mutationFn: api.destroySession,
@@ -613,6 +613,29 @@ export function ImageChatPage() {
     },
   });
 
+  const discussionMutation = useMutation({
+    mutationFn: (content: string) =>
+      api.sendImageSessionMessage(selectedSessionId!, {
+        content,
+        current_asset_id: currentContextAssetId,
+        selected_reference_asset_ids: pruneSelectedReferenceIds(
+          selectedReferenceAssetIds,
+          sessionReferenceAssets.map((asset) => asset.id),
+          maxSelectedReferenceCount,
+        ),
+      }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["image-session", response.session.id], response.session);
+      void queryClient.invalidateQueries({ queryKey: ["image-sessions"] });
+      setDraft("");
+      setSuccessMessage("");
+      setErrorMessage("");
+    },
+    onError: (error) => {
+      setErrorMessage(error instanceof ApiError ? error.detail : t("chat.generateFailed"));
+    },
+  });
+
   const retryGenerationTaskMutation = useMutation({
     mutationFn: (input: { sessionId: string; taskId: string }) =>
       api.retryImageSessionGenerationTask(input.sessionId, input.taskId),
@@ -646,9 +669,6 @@ export function ImageChatPage() {
       setErrorMessage(error instanceof ApiError ? error.detail : t("chat.cancelFailed"));
     },
   });
-
-  const generateDisabled =
-    !selectedSessionId || !imageSession || !draft.trim() || generateMutation.isPending || Boolean(baseRequirementMessage);
 
   const attachMutation = useMutation({
     mutationFn: (payload: { assetId: string; target: "reference" | "main_source"; productId: string }) =>
@@ -684,10 +704,6 @@ export function ImageChatPage() {
     if (!selectedSessionId || !imageSession || !prompt || generateMutation.isPending) {
       return;
     }
-    if (baseRequirementMessage) {
-      setErrorMessage(baseRequirementMessage);
-      return;
-    }
     const selectedReferenceIds = pruneSelectedReferenceIds(
       selectedReferenceAssetIds,
       sessionReferenceAssets.map((asset) => asset.id),
@@ -696,7 +712,7 @@ export function ImageChatPage() {
     const payload: ImageGenerationSubmitPayload = {
       prompt,
       size,
-      base_asset_id: requiresGenerationBase ? branchBaseAssetId : null,
+      base_asset_id: currentContextAssetId,
       selected_reference_asset_ids: selectedReferenceIds,
       generation_count: clampGenerationCount(generationCount),
       tool_options: compactedToolOptions,
@@ -717,6 +733,22 @@ export function ImageChatPage() {
     duplicateSubmitGuardRef.current = { signature, submittedAt: now };
     pendingGeneratedRoundCountRef.current = imageSession?.rounds.length ?? 0;
     generateMutation.mutate(payload);
+  }
+
+  function handleDiscuss() {
+    const content = draft.trim();
+    if (!selectedSessionId || !imageSession || !content || discussionMutation.isPending || generateMutation.isPending) {
+      return;
+    }
+    discussionMutation.mutate(content);
+  }
+
+  function handleComposerKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    handleDiscuss();
   }
 
   function handleRetryGenerationTask(task: ImageSessionGenerationTask) {
@@ -784,7 +816,7 @@ export function ImageChatPage() {
 
   function handleSelectHistoryRound(assetId: string) {
     setSelectedGeneratedAssetId(assetId);
-    setBranchBaseAssetId(assetId);
+    setCurrentContextAssetId(assetId);
     setSelectedTaskPlaceholderId(null);
     setSuccessMessage("");
     setErrorMessage("");
@@ -1106,11 +1138,6 @@ export function ImageChatPage() {
                   <span className="inline-flex h-7 items-center rounded-full bg-white px-3 shadow-sm ring-1 ring-slate-200 dark:border dark:border-violet-400/30 dark:bg-slate-950/70 dark:text-violet-100 dark:ring-violet-400/20">
                     {t("chat.currentResult")}
                   </span>
-                  {branchBaseRound ? (
-                    <span className="inline-flex h-7 items-center gap-1 rounded-full bg-indigo-600 px-3 text-white shadow-sm shadow-indigo-500/20 dark:bg-violet-500/20 dark:text-violet-100 dark:ring-1 dark:ring-violet-400/40">
-                      <Layers3 size={12} /> {t("chat.baseSelected")}
-                    </span>
-                  ) : null}
                 </div>
                 <h1 className="mt-2 text-xl font-semibold tracking-tight text-slate-950 dark:text-white">
                   {imageSession?.title ?? t("chat.workbench")}
@@ -1165,10 +1192,30 @@ export function ImageChatPage() {
               </div>
             </div>
 
+            {imageSession?.messages?.length ? (
+              <div className="mb-3 max-h-40 space-y-2 overflow-y-auto px-1" aria-label={t("chat.discussionHistory")}>
+                {imageSession.messages.map((message: ImageSessionMessage) => (
+                  <div
+                    key={message.id}
+                    className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                  >
+                    <div
+                      className={`max-w-[min(88%,42rem)] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-6 ${
+                        message.role === "user"
+                          ? "bg-indigo-600 text-white dark:bg-violet-600"
+                          : "border border-slate-200 bg-white text-slate-700 dark:border-slate-700 dark:bg-slate-950/75 dark:text-slate-200"
+                      }`}
+                    >
+                      {message.content}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             <ImageChatMainStage
               selectedRound={selectedRound}
               selectedPlaceholder={selectedPlaceholder}
-              branchBaseRound={branchBaseRound}
               retryingTaskId={retryGenerationTaskMutation.isPending ? (retryGenerationTaskMutation.variables?.taskId ?? null) : null}
               cancellingTaskId={cancelGenerationTaskMutation.isPending ? (cancelGenerationTaskMutation.variables?.taskId ?? null) : null}
               regenerating={generateMutation.isPending}
@@ -1195,14 +1242,28 @@ export function ImageChatPage() {
                 ))}
               </div>
             ) : null}
+
+            <div className="block">
+              <ImageChatComposer
+                draft={draft}
+                onDraftChange={setDraft}
+                onDiscuss={handleDiscuss}
+                onGenerate={handleGenerate}
+                onKeyDown={handleComposerKeyDown}
+                discussionBusy={discussionMutation.isPending}
+                generationBusy={generateMutation.isPending}
+                disabled={!selectedSessionId || !imageSession}
+                generationCount={submitGenerationCount}
+                t={t}
+              />
+            </div>
           </div>
 
           <ImageChatHistoryPanel
             historyBranches={historyBranches}
             selectedGeneratedAssetId={selectedGeneratedAssetId}
             selectedTaskPlaceholderId={selectedTaskPlaceholderId}
-            branchBaseAssetId={branchBaseAssetId}
-            branchBaseSelected={Boolean(branchBaseRound)}
+            currentContextAssetId={currentContextAssetId}
             style={historyPanelStyle}
             onResizeStart={(event) => handlePanelResizeStart("history", event)}
             onSelectRound={handleSelectHistoryRound}
@@ -1293,26 +1354,12 @@ export function ImageChatPage() {
                     t={t}
                   />
 
-                  <div>
-                    <label className="mb-2 block text-sm font-semibold text-slate-950 dark:text-white" htmlFor="image-chat-prompt">
-                      {t("chat.prompt")}
-                    </label>
-                    <textarea
-                      id="image-chat-prompt"
-                      value={draft}
-                      onChange={(event) => setDraft(event.target.value)}
-                      rows={6}
-                      placeholder={t("chat.freePromptPlaceholder")}
-                      className="w-full resize-none rounded-2xl border border-slate-200 px-3 py-3 text-sm leading-6 text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-violet-400 dark:focus:ring-violet-400/20"
-                    />
-                  </div>
-
                   <ImageGenerationSettingsPanel
                     size={size}
                     sizeOptions={sizeOptions}
                     maxDimension={imageGenerationMaxDimension}
                     toolOptions={toolOptions}
-                    allowedToolFields={imageToolAllowedFields}
+                    allowedToolFields={imageChatToolAllowedFields}
                     generationCount={generationCount}
                     generationCountOptions={IMAGE_CHAT_GENERATION_COUNT_OPTIONS}
                     onSizeChange={setSize}
@@ -1323,7 +1370,7 @@ export function ImageChatPage() {
                 </div>
               }
               advanced={
-                <ImageToolControls value={toolOptions} allowedFields={imageToolAllowedFields} onChange={setToolOptions} />
+                <ImageToolControls value={toolOptions} allowedFields={imageChatToolAllowedFields} onChange={setToolOptions} />
               }
             />
 
@@ -1339,30 +1386,6 @@ export function ImageChatPage() {
             </div>
           </div>
 
-          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 p-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] shadow-[0_-8px_24px_rgba(15,23,42,0.10)] backdrop-blur dark:border-slate-800 dark:bg-slate-950/90 dark:shadow-[0_-18px_40px_rgba(0,0,0,0.32)] lg:sticky lg:inset-x-auto lg:bottom-0 lg:p-4">
-            {baseRequirementMessage ? (
-              <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 dark:border-amber-400/35 dark:bg-amber-500/10 dark:text-amber-200">
-                {baseRequirementMessage}
-              </div>
-            ) : null}
-            <button
-              type="button"
-              onClick={handleGenerate}
-              disabled={generateDisabled}
-              className="inline-flex w-full items-center justify-center rounded-2xl bg-indigo-600 px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-indigo-600/20 transition-colors hover:bg-indigo-500 disabled:opacity-60 dark:bg-gradient-to-r dark:from-indigo-500 dark:via-violet-500 dark:to-fuchsia-500 dark:shadow-violet-900/45 dark:ring-1 dark:ring-violet-300/35"
-            >
-              {generateMutation.isPending ? (
-                <Loader2 size={15} className="mr-2 animate-spin" />
-              ) : (
-                <Sparkles size={15} className="mr-2" />
-              )}
-              {generateMutation.isPending
-                ? t("chat.submitting")
-                : submitGenerationCount > 1
-                  ? t("chat.startGenerateCount", { count: submitGenerationCount })
-                  : t("chat.startGenerate")}
-            </button>
-          </div>
         </aside>
       </main>
       <Drawer.Root
@@ -1459,8 +1482,7 @@ export function ImageChatPage() {
               historyBranches={historyBranches}
               selectedGeneratedAssetId={selectedGeneratedAssetId}
               selectedTaskPlaceholderId={selectedTaskPlaceholderId}
-              branchBaseAssetId={branchBaseAssetId}
-              branchBaseSelected={Boolean(branchBaseRound)}
+              currentContextAssetId={currentContextAssetId}
               variant="mobileDrawer"
               onSelectRound={handleSelectHistoryRound}
               onSelectPlaceholder={handleSelectHistoryPlaceholder}
@@ -1508,9 +1530,9 @@ export function ImageChatPage() {
             }`}
             aria-label={t("chat.openGenerationSheet")}
           >
-            <Sparkles size={17} className="mr-2 shrink-0" />
+            <Settings size={17} className="mr-2 shrink-0" />
             <span className="min-w-0 flex-1">
-              <span className="block text-sm font-semibold leading-5">{t("chat.mobileGenerate")}</span>
+              <span className="block text-sm font-semibold leading-5">{t("chat.generationSettings")}</span>
             </span>
             <ChevronRight size={17} className="ml-2 shrink-0 text-indigo-100 dark:text-violet-100" />
           </button>
@@ -1569,26 +1591,12 @@ export function ImageChatPage() {
                       t={t}
                     />
 
-                    <div>
-                      <label className="mb-2 block text-sm font-semibold text-slate-950 dark:text-white" htmlFor="image-chat-prompt-mobile">
-                        {t("chat.prompt")}
-                      </label>
-                      <textarea
-                        id="image-chat-prompt-mobile"
-                        value={draft}
-                        onChange={(event) => setDraft(event.target.value)}
-                        rows={6}
-                        placeholder={t("chat.freePromptPlaceholder")}
-                        className="w-full resize-none rounded-2xl border border-slate-200 px-3 py-3 text-sm leading-6 text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-100 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-violet-400 dark:focus:ring-violet-400/20"
-                      />
-                    </div>
-
                     <ImageGenerationSettingsPanel
                       size={size}
                       sizeOptions={sizeOptions}
                       maxDimension={imageGenerationMaxDimension}
                       toolOptions={toolOptions}
-                      allowedToolFields={imageToolAllowedFields}
+                      allowedToolFields={imageChatToolAllowedFields}
                       generationCount={generationCount}
                       generationCountOptions={IMAGE_CHAT_GENERATION_COUNT_OPTIONS}
                       onSizeChange={setSize}
@@ -1599,7 +1607,7 @@ export function ImageChatPage() {
                   </div>
                 }
                 advanced={
-                  <ImageToolControls value={toolOptions} allowedFields={imageToolAllowedFields} onChange={setToolOptions} />
+                  <ImageToolControls value={toolOptions} allowedFields={imageChatToolAllowedFields} onChange={setToolOptions} />
                 }
               />
 
@@ -1615,23 +1623,12 @@ export function ImageChatPage() {
               </div>
             </div>
             <div className="border-t border-slate-200 bg-white/96 p-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] dark:border-slate-800 dark:bg-slate-950/94">
-              {baseRequirementMessage ? (
-                <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 dark:border-amber-400/35 dark:bg-amber-500/10 dark:text-amber-200">
-                  {baseRequirementMessage}
-                </div>
-              ) : null}
               <button
                 type="button"
-                onClick={handleGenerate}
-                disabled={generateDisabled}
-                className="inline-flex min-h-12 w-full items-center justify-center rounded-2xl bg-indigo-600 px-4 text-sm font-semibold text-white shadow-lg shadow-indigo-600/20 transition-colors active:scale-[0.98] hover:bg-indigo-500 disabled:opacity-60 dark:bg-gradient-to-r dark:from-indigo-500 dark:via-violet-500 dark:to-fuchsia-500 dark:shadow-violet-900/45 dark:ring-1 dark:ring-violet-300/35"
+                onClick={() => setMobileGenerationSheetOpen(false)}
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition-colors hover:border-indigo-300 hover:text-indigo-700 dark:border-slate-700 dark:bg-slate-950/70 dark:text-slate-200 dark:hover:border-violet-400/55 dark:hover:text-violet-100"
               >
-                {generateMutation.isPending ? <Loader2 size={15} className="mr-2 animate-spin" /> : <Sparkles size={15} className="mr-2" />}
-                {generateMutation.isPending
-                  ? t("chat.submitting")
-                  : submitGenerationCount > 1
-                    ? t("chat.startGenerateCount", { count: submitGenerationCount })
-                    : t("chat.startGenerate")}
+                {t("common.cancel")}
               </button>
             </div>
           </Drawer.Content>

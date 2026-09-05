@@ -55,7 +55,7 @@ export function LoginPage({ authenticated }: LoginPageProps) {
           <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-900 shadow-sm shadow-zinc-900/20 dark:border dark:border-violet-400/35 dark:bg-violet-500/18 dark:shadow-violet-950/30">
             <LayoutGrid size={20} className="text-white" strokeWidth={2} />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-white">ProductFlow</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-white">{t("app.brand")}</h1>
           <p className="mt-1 text-sm text-zinc-500 dark:text-slate-400">{t("login.subtitle")}</p>
         </div>
 

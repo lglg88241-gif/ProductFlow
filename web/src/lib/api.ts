@@ -12,7 +12,9 @@ import type {
   GenerationQueueOverview,
   CreateUserTemplateGroupInput,
   CreateProductInput,
+  CopyInputExtractionResponse,
   ImageSessionDetail,
+  ImageSessionDiscussionResponse,
   ImageSessionListResponse,
   ImageSessionStatus,
   ImageToolOptions,
@@ -202,6 +204,14 @@ export const api = {
       body: formData,
     });
   },
+  async extractCopyInput(file: File): Promise<CopyInputExtractionResponse> {
+    const formData = new FormData();
+    formData.set("file", file);
+    return request("/api/copy-inputs/extract", {
+      method: "POST",
+      body: formData,
+    });
+  },
   async addReferenceImages(productId: string, files: File[]): Promise<ProductDetail> {
     const formData = new FormData();
     files.forEach((file) => {
@@ -273,6 +283,19 @@ export const api = {
     },
   ): Promise<ImageSessionDetail> {
     return request(`/api/image-sessions/${sessionId}/generate`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+  sendImageSessionMessage(
+    sessionId: string,
+    input: {
+      content: string;
+      current_asset_id?: string | null;
+      selected_reference_asset_ids?: string[];
+    },
+  ): Promise<ImageSessionDiscussionResponse> {
+    return request(`/api/image-sessions/${sessionId}/messages`, {
       method: "POST",
       body: JSON.stringify(input),
     });

@@ -305,3 +305,63 @@ class OpenAITextProvider(TextProvider):
         )
         payload = structured_payload.to_copy_payload(fallback_purpose=config.purpose)
         return payload, self.copy_model
+
+    def generate_image_chat_advice(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        current_image_data_url: str | None = None,
+        reference_image_data_urls: list[str] | None = None,
+    ) -> tuple[str, str]:
+        content: list[dict[str, str]] = []
+        generation_context = [item for item in messages if item.get("context_kind") == "generation_round"][-16:]
+        discussion_context = [item for item in messages if item.get("context_kind") != "generation_round"][-12:]
+        if generation_context:
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": "以下是最近最多 8 轮生成记录，仅用于理解创作演变：",
+                }
+            )
+        for item in generation_context:
+            role = item.get("role", "user")
+            text = item.get("content", "").strip()
+            if text:
+                content.append({"type": "input_text", "text": f"{role}: {text}"})
+        if discussion_context:
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": "以下是最近最多 12 条讨论，越新的用户约束优先级越高：",
+                }
+            )
+        for item in discussion_context:
+            role = item.get("role", "user")
+            text = item.get("content", "").strip()
+            if text:
+                content.append({"type": "input_text", "text": f"{role}: {text}"})
+        image_urls = [
+            image_url
+            for image_url in [current_image_data_url, *(reference_image_data_urls or [])]
+            if image_url
+        ][:6]
+        for image_url in image_urls:
+            content.append({"type": "input_image", "image_url": image_url})
+        try:
+            response = self.client.responses.create(
+                model=self.copy_model,
+                instructions=(
+                    "你是图片共创顾问，本次调用只回复讨论内容，不生成图片。"
+                    "你可以讨论风格、构图、文案、季节、人物和品牌约束。"
+                    "明确区分用户要求与助手建议：用户最近提出的约束优先，历史助手内容永远只是建议。"
+                    "结合当前作品和固定参考图给出简洁、可执行的回复；"
+                    "只有确实缺少决定方向的关键信息时才问一个简短问题。"
+                ),
+                input=[{"role": "user", "content": content}],
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("图片创意顾问请求失败，请检查文案 provider 配置") from exc
+        text = getattr(response, "output_text", None)
+        if not isinstance(text, str) or not text.strip():
+            raise RuntimeError("图片创意顾问没有返回文字建议")
+        return text.strip(), self.copy_model

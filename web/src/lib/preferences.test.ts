@@ -36,10 +36,10 @@ describe("i18n helpers", () => {
 
   it("translates keys with interpolation", () => {
     expect(translate("zh-CN", "products.paginationSummary", { page: 2, totalPages: 5, total: 48 })).toBe(
-      "第 2 / 5 页 · 共 48 个商品",
+      "第 2 / 5 页 · 共 48 个项目",
     );
     expect(translate("en-US", "products.paginationSummary", { page: 2, totalPages: 5, total: 48 })).toBe(
-      "Page 2 / 5 · 48 products",
+      "Page 2 / 5 · 48 projects",
     );
     expect(interpolate("Hello {name}, {missing}", { name: "Ada" })).toBe("Hello Ada, {missing}");
   });

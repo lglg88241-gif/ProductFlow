@@ -162,7 +162,7 @@ export function TopNav({ breadcrumbs, onHome, onLogout }: TopNavProps) {
               <span className="mr-2 inline-flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-sm shadow-indigo-600/20">
                 <Wand2 size={17} />
               </span>
-              <span className="hidden sm:inline">ProductFlow</span>
+              <span className="hidden sm:inline">{t("app.brand")}</span>
             </button>
             {breadcrumbs ? (
               <>

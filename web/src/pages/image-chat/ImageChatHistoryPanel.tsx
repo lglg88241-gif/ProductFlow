@@ -22,8 +22,7 @@ interface ImageChatHistoryPanelProps {
   historyBranches: ImageHistoryBranch[];
   selectedGeneratedAssetId: string | null;
   selectedTaskPlaceholderId: string | null;
-  branchBaseAssetId: string | null;
-  branchBaseSelected: boolean;
+  currentContextAssetId: string | null;
   variant?: "desktop" | "mobileDrawer";
   style?: CSSProperties;
   onResizeStart?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
@@ -37,8 +36,7 @@ export function ImageChatHistoryPanel({
   historyBranches,
   selectedGeneratedAssetId,
   selectedTaskPlaceholderId,
-  branchBaseAssetId,
-  branchBaseSelected,
+  currentContextAssetId,
   variant = "desktop",
   style,
   onResizeStart,
@@ -72,7 +70,7 @@ export function ImageChatHistoryPanel({
                 branch={branch}
                 selectedGeneratedAssetId={selectedGeneratedAssetId}
                 selectedTaskPlaceholderId={selectedTaskPlaceholderId}
-                branchBaseAssetId={branchBaseAssetId}
+                currentContextAssetId={currentContextAssetId}
                 variant="mobileDrawer"
                 onSelectRound={onSelectRound}
                 onSelectPlaceholder={onSelectPlaceholder}
@@ -112,11 +110,6 @@ export function ImageChatHistoryPanel({
         <div>
           <div className="text-sm font-semibold text-slate-950 dark:text-white">{t("chat.history")}</div>
         </div>
-        {branchBaseSelected ? (
-          <div className="rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs font-semibold text-indigo-700 dark:border-violet-400/40 dark:bg-violet-500/15 dark:text-violet-100">
-            {t("chat.clickHistoryBase")}
-          </div>
-        ) : null}
       </div>
 
       {historyBranches.length ? (
@@ -130,7 +123,7 @@ export function ImageChatHistoryPanel({
               branch={branch}
               selectedGeneratedAssetId={selectedGeneratedAssetId}
               selectedTaskPlaceholderId={selectedTaskPlaceholderId}
-              branchBaseAssetId={branchBaseAssetId}
+              currentContextAssetId={currentContextAssetId}
               onSelectRound={onSelectRound}
               onSelectPlaceholder={onSelectPlaceholder}
               onPreviewPrompt={onPreviewPrompt}

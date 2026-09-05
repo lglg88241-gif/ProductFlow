@@ -30,3 +30,14 @@ class TextProvider(ABC):
         reference_images: list[ReferenceImageInput] | None = None,
     ) -> tuple[CopyPayloadV2, str]:
         raise NotImplementedError
+
+    @abstractmethod
+    def generate_image_chat_advice(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        current_image_data_url: str | None = None,
+        reference_image_data_urls: list[str] | None = None,
+    ) -> tuple[str, str]:
+        """Return a concise creative reply for an image co-creation conversation."""
+        raise NotImplementedError

@@ -74,9 +74,11 @@ Visual reference policy:
 Generate the image directly. Do not return explanatory text."""
 DEFAULT_PROMPT_POSTER_IMAGE_EDIT_TEMPLATE = DEFAULT_PROMPT_POSTER_IMAGE_TEMPLATE
 DEFAULT_PROMPT_POSTER_IMAGE_REFERENCE_POLICY = (
-    "When input images are provided, use the actual product/subject in those images as the visual baseline. "
-    "If text facts are weak, prioritize the visible product subject. Do not replace it with unrelated people, IP, "
-    "brands, products, or ad themes. Treat copy as auxiliary selling-point and layout context."
+    "Follow the role of every image in the input-image manifest. Preserve identity, packaging, logo and factual "
+    "details only from user-owned primary_subject, person, product, brand and user_material inputs. "
+    "For those user-owned subject inputs, use the actual product/subject in those images as the visual baseline. "
+    "style_template input controls only composition rhythm, typography scale, palette, spacing, texture and light; "
+    "never copy its text, logo, person, product or company identity."
 )
 DEFAULT_PROMPT_IMAGE_CHAT_TEMPLATE = """Create an image from the current user request.
 Output size: {size}
@@ -149,7 +151,7 @@ class Settings(BaseSettings):
     image_api_key: str | None = None
     image_base_url: str | None = None
     image_generate_model: str = "gpt-5.4"
-    image_images_quality: str | None = None
+    image_images_quality: str | None = "medium"
     image_images_style: str | None = None
     image_responses_background_enabled: bool = False
     image_tool_model: str | None = None
@@ -659,7 +661,7 @@ def filter_image_tool_options(
     resolved_allowed_fields = (
         allowed_fields
         if allowed_fields is not None
-        else parse_image_tool_allowed_fields(get_runtime_settings().image_tool_allowed_fields)
+        else _resolve_runtime_image_tool_allowed_fields()
     )
     selected_fields = set(resolved_allowed_fields)
     normalized = {
@@ -670,6 +672,18 @@ def filter_image_tool_options(
         and not (isinstance(value, str) and not value.strip())
     }
     return normalized or None
+
+
+def _resolve_runtime_image_tool_allowed_fields() -> tuple[str, ...]:
+    """Use runtime overrides when available, with a pure-function-safe fallback."""
+
+    try:
+        return parse_image_tool_allowed_fields(get_runtime_settings().image_tool_allowed_fields)
+    except ValidationError:
+        # Helpers such as normalize_image_generation_tool_options are also used
+        # by offline tooling and tests that intentionally do not configure the
+        # full application environment.
+        return DEFAULT_IMAGE_TOOL_ALLOWED_FIELDS
 
 
 def normalize_config_value(key: str, value: Any) -> str:

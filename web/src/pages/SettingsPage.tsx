@@ -1568,16 +1568,22 @@ function ImageBindingSection({ data, draft, pending, onChange, onSave }: ImageBi
             { value: "openai_images", label: t("settings.provider.interface.openaiImages") },
             { value: "google_gemini_image", label: t("settings.provider.interface.googleGeminiImage") },
           ]}
-          onChange={(value) =>
+          onChange={(value) => {
+            const providerKind =
+              value === "openai_responses" || value === "openai_images" || value === "google_gemini_image"
+                ? value
+                : "mock";
+            const currentModel = draft.model.trim();
             onChange({
               ...draft,
-              provider_kind:
-                value === "openai_responses" || value === "openai_images" || value === "google_gemini_image"
-                  ? value
-                  : "mock",
+              provider_kind: providerKind,
               provider_profile_id: "",
-            })
-          }
+              model:
+                providerKind === "openai_images" && (!currentModel || currentModel === "gpt-5.4")
+                  ? "gpt-image-2"
+                  : draft.model,
+            });
+          }}
           radius="lg"
         />
       </SettingsFormField>

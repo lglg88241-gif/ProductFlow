@@ -12,6 +12,10 @@ from productflow_backend.application.contracts import PosterGenerationInput
 from productflow_backend.application.copy_payloads import copy_payload_context_text, validate_copy_payload
 from productflow_backend.application.image_generation_core import build_stored_image_reference_payload
 from productflow_backend.application.image_generation_failures import classify_image_generation_failure
+from productflow_backend.application.moments_poster_templates import (
+    canvas_template_key_from_config,
+    moments_template_design,
+)
 from productflow_backend.application.product_workflow.artifacts import (
     GeneratedWorkflowImage,
     create_context_copy_set,
@@ -108,8 +112,11 @@ def execute_workflow_image_generation(
     node: WorkflowNode,
     dependencies: WorkflowExecutionDependencies | None = None,
 ) -> dict[str, object]:
+    uses_default_dependencies = dependencies is None
     dependencies = dependencies or default_workflow_execution_dependencies()
     product = workflow.product
+    template_key = canvas_template_key_from_config(node.config_json)
+    template_design = moments_template_design(template_key)
     incoming_context = collect_incoming_context(workflow, node.id, include_transitive_product_context=True)
     product_context = effective_product_context(workflow, node.id, include_transitive=True)
     downstream_nodes = downstream_reference_nodes(workflow, node.id)
@@ -142,11 +149,32 @@ def execute_workflow_image_generation(
         workflow,
         incoming_context.image_asset_ids,
         incoming_context.poster_variant_ids,
+        include_unbound_product_uploads=template_design is not None,
     )
     reference_payload = build_stored_image_reference_payload(
         reference_assets,
         resolve_storage_path=storage.resolve,
     )
+    reference_images = [
+        reference.model_copy(
+            update={
+                "role": "primary_subject" if asset.kind == SourceAssetKind.ORIGINAL_IMAGE else "user_material",
+                "label": (
+                    "用户上传的主视觉"
+                    if asset.kind == SourceAssetKind.ORIGINAL_IMAGE
+                    else f"用户附加素材 {index}"
+                ),
+            }
+        )
+        for index, (reference, asset) in enumerate(
+            zip(reference_payload.reference_images, reference_assets, strict=True),
+            start=1,
+        )
+    ]
+    if template_design is not None:
+        if not template_design.reference_path.is_file():
+            raise RuntimeError(f"内置样板素材不存在: {template_design.reference_filename}")
+        reference_images.append(template_design.reference_input())
     render_input = PosterGenerationInput(
         copy_prompt_mode="copy" if structured_copy_context else "image_edit",
         product_name=product_context["name"] or "",
@@ -158,8 +186,11 @@ def execute_workflow_image_generation(
         image_size=image_size_from_config(node.config_json),
         tool_options=image_tool_options_from_config(node.config_json),
         structured_copy_context=structured_copy_context,
+        template_key=template_key,
+        template_style_spec=template_design.style_spec if template_design is not None else None,
+        full_canvas_redesign=template_design is not None,
         source_image=reference_payload.source_image,
-        reference_images=reference_payload.reference_images,
+        reference_images=reference_images,
     )
     poster_ids: list[str] = []
     filled_source_asset_ids: list[str] = []
@@ -167,9 +198,14 @@ def execute_workflow_image_generation(
     provider_results: list[dict[str, object]] = []
     settings = get_runtime_settings()
     kind = poster_kind_from_config(node.config_json)
-    image_provider_config = (
-        None if settings.poster_generation_mode == "generated" else resolve_image_provider_config()
-    )
+    image_provider_config = None
+    if settings.poster_generation_mode != "generated" or (template_design is not None and uses_default_dependencies):
+        image_provider_config = resolve_image_provider_config()
+    if template_design is not None and uses_default_dependencies:
+        if image_provider_config is None or not is_real_image_provider_kind(image_provider_config.provider_kind):
+            raise BusinessValidationError(
+                "当前图片供应商仍是 Mock。朋友圈样板必须先绑定真实 Image2 图片供应商；系统不会再输出占位拼装图。"
+            )
     poster_generation_mode = effective_workflow_image_generation_mode(
         settings.poster_generation_mode,
         image_provider_config.provider_kind if image_provider_config is not None else None,
@@ -262,7 +298,9 @@ def execute_workflow_image_generation(
             "copy_set_id": copy_set.id,
             "copy_prompt_mode": render_input.copy_prompt_mode,
             "upstream_text_count": len(incoming_context.text_contexts),
-            "reference_image_count": len(incoming_context.image_asset_ids),
+            "reference_image_count": len(reference_assets),
+            "template_reference_count": 1 if template_design is not None else 0,
+            "template_key": template_key,
             "poster_variant_count": len(incoming_context.poster_variant_ids),
         },
         "context_sources": incoming_context.text_sources[:8],

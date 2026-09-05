@@ -11,6 +11,7 @@ from productflow_backend.application.image_sessions import (
     create_image_session,
     delete_image_session,
     delete_image_session_reference_image,
+    discuss_image_session,
     get_image_session_detail,
     get_image_session_status,
     list_image_sessions,
@@ -24,14 +25,17 @@ from productflow_backend.presentation.deps import get_session, require_admin, re
 from productflow_backend.presentation.image_variants import serve_image_variant
 from productflow_backend.presentation.schemas.image_sessions import (
     AttachImageSessionAssetRequest,
+    CreateImageSessionMessageRequest,
     CreateImageSessionRequest,
     GenerateImageSessionRoundRequest,
     ImageSessionDetailResponse,
+    ImageSessionDiscussionResponse,
     ImageSessionListResponse,
     ImageSessionStatusResponse,
     ProductWritebackResponse,
     UpdateImageSessionRequest,
     serialize_image_session_detail,
+    serialize_image_session_message,
     serialize_image_session_status,
     serialize_image_session_summary,
 )
@@ -86,6 +90,29 @@ def update_image_session_endpoint(
 ) -> ImageSessionDetailResponse:
     image_session = update_image_session(session, image_session_id=image_session_id, title=payload.title)
     return serialize_image_session_detail(image_session)
+
+
+@router.post(
+    "/image-sessions/{image_session_id}/messages",
+    response_model=ImageSessionDiscussionResponse,
+)
+def create_image_session_message_endpoint(
+    image_session_id: str,
+    payload: CreateImageSessionMessageRequest,
+    session: Session = Depends(get_session),
+) -> ImageSessionDiscussionResponse:
+    result = discuss_image_session(
+        session,
+        image_session_id=image_session_id,
+        content=payload.content,
+        current_asset_id=payload.current_asset_id,
+        selected_reference_asset_ids=payload.selected_reference_asset_ids,
+    )
+    return ImageSessionDiscussionResponse(
+        user_message=serialize_image_session_message(result.user_message),
+        assistant_message=serialize_image_session_message(result.assistant_message),
+        session=serialize_image_session_detail(result.image_session),
+    )
 
 
 @router.delete(

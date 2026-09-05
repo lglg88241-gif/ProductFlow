@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, text
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -430,6 +430,33 @@ class ImageSession(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="ImageSessionGenerationTask.created_at",
     )
+    messages: Mapped[list[ImageSessionMessage]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="(ImageSessionMessage.created_at, ImageSessionMessage.id)",
+    )
+
+
+class ImageSessionMessage(Base):
+    """Plain-text discussion turns kept alongside generated image rounds."""
+
+    __tablename__ = "image_session_messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_image_session_messages_role"),
+        Index("ix_image_session_messages_session_created", "session_id", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("image_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    session: Mapped[ImageSession] = relationship(back_populates="messages")
 
 
 class ImageSessionAsset(Base):

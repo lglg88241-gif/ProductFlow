@@ -12,6 +12,7 @@ from productflow_backend.infrastructure.db.models import (
     ImageSession,
     ImageSessionAsset,
     ImageSessionGenerationTask,
+    ImageSessionMessage,
     ImageSessionRound,
 )
 from productflow_backend.presentation.image_variants import build_image_urls
@@ -100,6 +101,7 @@ class ImageSessionDetailResponse(BaseModel):
     assets: list[ImageSessionAssetResponse]
     rounds: list[ImageSessionRoundResponse]
     generation_tasks: list[ImageSessionGenerationTaskResponse] = Field(default_factory=list)
+    messages: list[ImageSessionMessageResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -118,6 +120,35 @@ class ImageSessionStatusResponse(BaseModel):
 
 class ImageSessionListResponse(BaseModel):
     items: list[ImageSessionSummaryResponse]
+
+
+class ImageSessionMessageResponse(BaseModel):
+    id: str
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: datetime
+
+
+class CreateImageSessionMessageRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(min_length=1, max_length=4000)
+    current_asset_id: str | None = None
+    selected_reference_asset_ids: list[str] = Field(default_factory=list, max_length=6)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, content: str) -> str:
+        normalized = content.strip()
+        if not normalized:
+            raise ValueError("讨论内容不能为空")
+        return normalized
+
+
+class ImageSessionDiscussionResponse(BaseModel):
+    user_message: ImageSessionMessageResponse
+    assistant_message: ImageSessionMessageResponse
+    session: ImageSessionDetailResponse
 
 
 class CreateImageSessionRequest(BaseModel):
@@ -156,7 +187,7 @@ class GenerateImageSessionRoundRequest(BaseModel):
     size: str = Field(default="1024x1024")
     base_asset_id: str | None = None
     selected_reference_asset_ids: list[str] = Field(default_factory=list, max_length=6)
-    generation_count: int = Field(default=1, ge=1, le=10)
+    generation_count: int = Field(default=2, ge=1, le=10)
     tool_options: ImageToolOptionsRequest | None = None
 
     @field_validator("prompt")
@@ -310,6 +341,7 @@ def serialize_image_session_detail(image_session: ImageSession) -> ImageSessionD
     rounds = sorted(image_session.rounds, key=lambda item: item.created_at)
     assets = sorted(image_session.assets, key=lambda item: item.created_at, reverse=True)
     generation_tasks = sorted(image_session.generation_tasks, key=lambda item: item.created_at, reverse=True)
+    messages = sorted(image_session.messages, key=lambda item: (item.created_at, item.id))
     notes_by_group = {
         round_item.generation_group_id: extract_provider_notes(round_item.provider_output_json)
         for round_item in rounds
@@ -327,8 +359,19 @@ def serialize_image_session_detail(image_session: ImageSession) -> ImageSessionD
             )
             for item in generation_tasks
         ],
+        messages=[serialize_image_session_message(item) for item in messages],
         created_at=image_session.created_at,
         updated_at=image_session.updated_at,
+    )
+
+
+def serialize_image_session_message(message: ImageSessionMessage) -> ImageSessionMessageResponse:
+    role = message.role if message.role in {"user", "assistant"} else "assistant"
+    return ImageSessionMessageResponse(
+        id=message.id,
+        role=role,  # type: ignore[arg-type]
+        content=message.content,
+        created_at=message.created_at,
     )
 
 

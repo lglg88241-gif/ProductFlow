@@ -319,6 +319,8 @@ def reference_assets_for_image_generation(
     workflow: ProductWorkflow,
     incoming_source_asset_ids: list[str],
     incoming_poster_variant_ids: list[str],
+    *,
+    include_unbound_product_uploads: bool = False,
 ) -> list[SourceAsset]:
     product = workflow.product
     assets: list[SourceAsset] = []
@@ -338,6 +340,20 @@ def reference_assets_for_image_generation(
                     storage_path=poster.storage_path,
                 )
             )
+    if include_unbound_product_uploads:
+        product_uploads = list(
+            session.scalars(
+                select(SourceAsset)
+                .where(
+                    SourceAsset.product_id == product.id,
+                    SourceAsset.kind.in_((SourceAssetKind.ORIGINAL_IMAGE, SourceAssetKind.REFERENCE_IMAGE)),
+                    SourceAsset.source_poster_variant_id.is_(None),
+                )
+                .order_by(SourceAsset.created_at, SourceAsset.id)
+            )
+        )
+        product_uploads.sort(key=lambda asset: asset.kind != SourceAssetKind.ORIGINAL_IMAGE)
+        assets.extend(product_uploads)
     return unique_image_generation_references(assets)
 
 

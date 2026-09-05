@@ -8,7 +8,10 @@ from typing import Literal
 ImageGenerationFailureCategory = Literal[
     "rate_limit",
     "quota",
+    "authentication",
+    "organization_verification",
     "content_policy",
+    "image_input",
     "connection",
     "timeout",
     "provider_5xx",
@@ -40,12 +43,48 @@ _NON_RETRYABLE_FAILURE_RULES: tuple[
     ...,
 ] = (
     (
+        "organization_verification",
+        "check_settings",
+        "当前 OpenAI 组织尚未完成 GPT Image 使用验证，请在 OpenAI 平台完成组织验证后重试",
+        (
+            re.compile(r"organi[sz]ation.{0,100}(verif|not verified|access)", re.IGNORECASE),
+            re.compile(r"(verif|verified).{0,100}organi[sz]ation", re.IGNORECASE),
+            re.compile(r"gpt[- ]?image.{0,100}(verif|organization access)", re.IGNORECASE),
+            re.compile(r"组织.{0,40}(验证|认证)"),
+        ),
+    ),
+    (
+        "authentication",
+        "check_settings",
+        "图片供应商缺少或拒绝了 API Key，请在供应商设置中配置有效密钥后重试",
+        (
+            re.compile(r"missing.{0,30}api[ _-]?key|api[ _-]?key.{0,30}missing", re.IGNORECASE),
+            re.compile(r"invalid_api_key|incorrect api key|authentication error|unauthorized", re.IGNORECASE),
+            re.compile(r"\b401\b"),
+            re.compile(r"缺少.{0,20}API Key|API Key.{0,20}(无效|错误|拒绝)", re.IGNORECASE),
+        ),
+    ),
+    (
         "content_policy",
         "revise_input",
         "图片供应商拒绝了本次内容或安全策略，请调整提示词或参考图后重试",
         (
             re.compile(r"content policy|safety|moderation|policy violation|blocked|refused", re.IGNORECASE),
             re.compile(r"拒绝|安全策略|内容政策|违规|敏感内容"),
+        ),
+    ),
+    (
+        "image_input",
+        "revise_input",
+        "当前作品或参考图未被图片供应商接受，请检查图片格式、尺寸和参考图数量后重试",
+        (
+            re.compile(
+                r"invalid image|unsupported image|corrupt image|failed to decode image|image format",
+                re.IGNORECASE,
+            ),
+            re.compile(r"multiple (files|images).{0,60}(not supported|unsupported|invalid)", re.IGNORECASE),
+            re.compile(r"too many (input )?images|image input.{0,60}(invalid|unsupported)", re.IGNORECASE),
+            re.compile(r"图片输入|参考图.{0,30}(失败|无效|不支持)|多张图片.{0,30}不支持"),
         ),
     ),
     (

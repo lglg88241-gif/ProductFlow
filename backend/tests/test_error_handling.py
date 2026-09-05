@@ -141,14 +141,20 @@ def test_image_session_route_uses_global_business_error_handler(configured_env) 
         json={"prompt": "首轮排队", "size": "1024x1024"},
     )
     assert first.status_code == 202
-    invalid = client.post(
+    second = client.post(
         f"/api/image-sessions/{session_id}/generate",
         json={"prompt": "第二轮缺少基图", "size": "1024x1024"},
     )
 
-    assert invalid.status_code == 400
-    assert invalid.json() == {"detail": "后续生图必须选择一张本会话已生成图片作为基图"}
-    assert "code" not in invalid.json()
+    assert second.status_code == 202
+    first_round_assets = {
+        round_item["generated_asset"]["id"] for round_item in first.json()["rounds"]
+    }
+    second_rounds = [
+        round_item for round_item in second.json()["rounds"] if round_item["prompt"] == "第二轮缺少基图"
+    ]
+    assert second_rounds
+    assert second_rounds[0]["base_asset_id"] in first_round_assets
 
 
 def test_gallery_route_uses_global_business_error_handler(configured_env) -> None:  # noqa: ARG001

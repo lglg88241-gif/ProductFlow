@@ -25,6 +25,7 @@ from productflow_backend.infrastructure.queue import (
 )
 from productflow_backend.presentation.errors import register_exception_handlers
 from productflow_backend.presentation.routes.auth import router as auth_router
+from productflow_backend.presentation.routes.copy_inputs import router as copy_inputs_router
 from productflow_backend.presentation.routes.gallery import router as gallery_router
 from productflow_backend.presentation.routes.generation_queue import router as generation_queue_router
 from productflow_backend.presentation.routes.image_sessions import router as image_sessions_router
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth_router)
+    app.include_router(copy_inputs_router)
     app.include_router(generation_queue_router)
     app.include_router(gallery_router)
     app.include_router(products_router)

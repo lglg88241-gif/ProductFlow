@@ -6,6 +6,7 @@ Supports any OpenAI-compatible image generation endpoint (DALL-E, SD WebUI, Comf
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from openai import OpenAI
 
 from productflow_backend.application.contracts import PosterGenerationInput
 from productflow_backend.application.language_policy import image_visible_text_requirements
+from productflow_backend.application.poster_prompt_context import build_poster_context_block
 from productflow_backend.config import get_runtime_settings
 from productflow_backend.domain.enums import PosterKind
 from productflow_backend.infrastructure.image.base import (
@@ -43,11 +45,46 @@ OPTIONAL_FIELDS_FALLBACK_NOTE = {
     "kind": "fallback",
     "message": "供应商不支持部分可选参数，已按基础参数完成。",
 }
-MULTI_IMAGE_FALLBACK_NOTE = {
-    "kind": "multi_image_fallback",
-    "message": "供应商不支持多张编辑输入，已仅使用基图完成。",
-}
 IMAGES_API_MAX_N = 10
+IMAGES_API_TRANSIENT_RETRIES = 2
+_OPTIONAL_IMAGE_FIELDS = frozenset(
+    {
+        "quality",
+        "style",
+        "output_format",
+        "output_compression",
+        "background",
+        "moderation",
+    }
+)
+_OPTIONAL_FIELD_ERROR_MARKERS = (
+    "unsupported",
+    "not supported",
+    "not_supported",
+    "unknown parameter",
+    "unknown field",
+    "unrecognized",
+    "unexpected keyword",
+    "unexpected argument",
+    "invalid parameter",
+    "invalid field",
+    "unsupported optional",
+    "额外参数",
+    "参数不支持",
+)
+_IMAGE_INPUT_ERROR_MARKERS = (
+    "multiple file",
+    "multiple image",
+    "too many image",
+    "image input",
+    "invalid image",
+    "unsupported image",
+    "corrupt image",
+    "image format",
+    "图片输入",
+    "参考图",
+    "多张图片",
+)
 
 
 @dataclass(slots=True)
@@ -58,6 +95,7 @@ class ImagesAPIResult:
     size: str
     generated_at: datetime
     revised_prompt: str | None
+    provider_request_id: str | None
     provider_request_json: dict[str, Any]
     provider_output_json: dict[str, Any]
 
@@ -111,6 +149,12 @@ class OpenAIImagesClient:
     ) -> list[ImagesAPIResult]:
         results: list[ImagesAPIResult] = []
         now = datetime.now(UTC)
+        provider_request_id = self._request_id_from_value(response)
+        safe_provider_output = dict(provider_output_json or {})
+        if provider_request_id:
+            productflow_metadata = dict(safe_provider_output.get("_productflow") or {})
+            productflow_metadata["provider_request_id"] = provider_request_id
+            safe_provider_output["_productflow"] = productflow_metadata
         for item in getattr(response, "data", []) or []:
             b64 = getattr(item, "b64_json", None)
             if not b64:
@@ -124,14 +168,46 @@ class OpenAIImagesClient:
                     size=size,
                     generated_at=now,
                     revised_prompt=getattr(item, "revised_prompt", None),
+                    provider_request_id=provider_request_id,
                     provider_request_json=provider_request_json,
-                    provider_output_json=provider_output_json or {},
+                    provider_output_json=safe_provider_output,
                 )
             )
 
         if not results:
             raise RuntimeError(PROVIDER_MISSING_OUTPUT_MESSAGE)
         return results
+
+    @staticmethod
+    def _request_id_from_value(value: Any) -> str | None:
+        for attribute in ("_request_id", "request_id", "requestID"):
+            request_id = getattr(value, attribute, None)
+            if request_id:
+                return str(request_id)[:255]
+        response = getattr(value, "response", None) or getattr(value, "http_response", None)
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            request_id = headers.get("x-request-id") or headers.get("request-id")
+            if request_id:
+                return str(request_id)[:255]
+        return None
+
+    def _log_provider_error(self, operation: str, exc: BaseException, *, model: str) -> None:
+        status_code = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if status_code is None and response is not None:
+            status_code = getattr(response, "status_code", None)
+        code = getattr(exc, "code", None)
+        request_id = self._request_id_from_value(exc)
+        logger.error(
+            "OpenAI Images API %s failed: model=%s status=%s code=%s request_id=%s error_class=%s",
+            operation,
+            model,
+            status_code,
+            code,
+            request_id,
+            type(exc).__name__,
+        )
 
     def _with_productflow_metadata(
         self,
@@ -154,7 +230,121 @@ class OpenAIImagesClient:
         return output
 
     def _should_retry_without_optional_fields(self, request_params: dict[str, Any]) -> bool:
-        return any(key in request_params for key in ("quality", "style"))
+        return any(key in request_params for key in _OPTIONAL_IMAGE_FIELDS)
+
+    @staticmethod
+    def _exception_diagnostic_text(exc: BaseException) -> str:
+        """Collect provider error fields for classification without exposing them to callers."""
+        parts: list[str] = []
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            parts.append(str(current))
+            for attribute in ("code", "param", "message", "body"):
+                value = getattr(current, attribute, None)
+                if value is not None:
+                    parts.append(str(value))
+            response = getattr(current, "response", None)
+            if response is not None:
+                response_body = getattr(response, "text", None) or getattr(response, "content", None)
+                if response_body:
+                    parts.append(str(response_body))
+            current = current.__cause__ or current.__context__
+        return " ".join(parts).lower()
+
+    def _is_optional_parameter_error(
+        self,
+        exc: BaseException,
+        request_params: dict[str, Any],
+    ) -> bool:
+        """Return true only for an error that names unsupported optional fields.
+
+        A generic 400 or a multi-image/input failure must not trigger a fallback:
+        dropping a reference image changes the user's requested edit.
+        """
+        if not self._should_retry_without_optional_fields(request_params) or self._is_transient_error(exc):
+            return False
+        diagnostic = self._exception_diagnostic_text(exc)
+        if any(marker in diagnostic for marker in _IMAGE_INPUT_ERROR_MARKERS):
+            return False
+        optional_field_named = (
+            any(field in diagnostic for field in _OPTIONAL_IMAGE_FIELDS)
+            or "optional field" in diagnostic
+            or "可选参数" in diagnostic
+        )
+        return optional_field_named and any(marker in diagnostic for marker in _OPTIONAL_FIELD_ERROR_MARKERS)
+
+    def _safe_request_failure_message(self, exc: BaseException, *, multiple_images: bool = False) -> str:
+        """Map common provider failures to a useful next step without raw provider text."""
+        diagnostic = self._exception_diagnostic_text(exc)
+        if any(
+            marker in diagnostic
+            for marker in ("moderation_blocked", "content policy", "safety policy", "policy violation")
+        ):
+            return "图片生成被内容安全策略拦截，请调整提示词或参考图后重试"
+        if "moderation" in diagnostic and any(marker in diagnostic for marker in ("block", "reject", "refus", "den")):
+            return "图片生成被内容安全策略拦截，请调整提示词或参考图后重试"
+        if "organization" in diagnostic and any(marker in diagnostic for marker in ("verif", "gpt image", "access")):
+            return "当前 OpenAI 组织尚未完成 GPT Image 验证，请在组织设置中完成验证后重试"
+        if multiple_images and any(marker in diagnostic for marker in _IMAGE_INPUT_ERROR_MARKERS):
+            return "图片供应商无法处理当前多图编辑输入，请检查参考图格式和数量，或更换支持多图编辑的 provider"
+        if any(
+            marker in diagnostic
+            for marker in ("invalid image", "unsupported image", "corrupt image", "image format", "图片输入")
+        ):
+            return "图片输入无法读取，请检查当前作品和参考图的格式、尺寸后重试"
+        return PROVIDER_REQUEST_FAILURE_MESSAGE
+
+    @staticmethod
+    def _is_transient_error(exc: BaseException) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+        try:
+            normalized_status = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            normalized_status = None
+        if normalized_status == 429 or (normalized_status is not None and 500 <= normalized_status <= 599):
+            return True
+        return bool(
+            re.search(
+                r"\b429\b|\b5\d\d\b|temporarily unavailable|server error",
+                str(exc),
+                re.IGNORECASE,
+            )
+        )
+
+    def _call_with_transient_retries(self, operation: Any, request_params: dict[str, Any]) -> Any:
+        """Retry only upstream throttling/server failures, never input errors."""
+        for attempt in range(IMAGES_API_TRANSIENT_RETRIES + 1):
+            self._rewind_request_files(request_params)
+            try:
+                return operation(**request_params)
+            except Exception as exc:  # noqa: BLE001
+                if not self._is_transient_error(exc) or attempt >= IMAGES_API_TRANSIENT_RETRIES:
+                    raise
+                logger.warning(
+                    "OpenAI Images API transient failure; retrying: attempt=%s error_class=%s",
+                    attempt + 1,
+                    type(exc).__name__,
+                )
+        raise AssertionError("unreachable transient retry state")
+
+    @staticmethod
+    def _rewind_request_files(request_params: dict[str, Any]) -> None:
+        """The OpenAI SDK consumes file handles; every retry must start at byte zero."""
+        for key in ("image", "mask"):
+            value = request_params.get(key)
+            values = value if isinstance(value, (list, tuple)) else (value,)
+            for file in values:
+                seek = getattr(file, "seek", None)
+                if callable(seek):
+                    try:
+                        seek(0)
+                    except (OSError, ValueError):
+                        continue
 
     def generate(
         self,
@@ -165,10 +355,14 @@ class OpenAIImagesClient:
         quality: str | None = None,
         style: str | None = None,
         n: int = 1,
+        output_format: str | None = None,
+        output_compression: int | None = None,
+        background: str | None = None,
+        moderation: str | None = None,
     ) -> list[ImagesAPIResult]:
         client = self._client()
         req_model = model or self.model
-        req_quality = quality or self.quality
+        req_quality = quality or self.quality or "medium"
         req_style = style or self.style
 
         request_params: dict[str, Any] = {
@@ -176,30 +370,39 @@ class OpenAIImagesClient:
             "prompt": prompt,
             "size": size,
             "n": n,
-            "response_format": "b64_json",
         }
+        if req_model != "gpt-image-2":
+            request_params["response_format"] = "b64_json"
         if req_quality:
             request_params["quality"] = req_quality
-        if req_style:
+        if req_style and req_model != "gpt-image-2":
             request_params["style"] = req_style
+        if output_format:
+            request_params["output_format"] = output_format
+        if output_compression is not None:
+            request_params["output_compression"] = output_compression
+        if background:
+            request_params["background"] = background
+        if moderation:
+            request_params["moderation"] = moderation
 
         fallback_used = False
         try:
-            response = client.images.generate(**request_params)
+            response = self._call_with_transient_retries(client.images.generate, request_params)
         except Exception as exc:  # noqa: BLE001
-            if not self._should_retry_without_optional_fields(request_params):
-                logger.error("OpenAI Images API generate 失败: error_class=%s", type(exc).__name__)
-                raise RuntimeError(PROVIDER_REQUEST_FAILURE_MESSAGE) from exc
+            if not self._is_optional_parameter_error(exc, request_params):
+                self._log_provider_error("generate", exc, model=req_model)
+                raise RuntimeError(self._safe_request_failure_message(exc)) from exc
             fallback_used = True
             fallback_params = {
-                key: value for key, value in request_params.items() if key not in {"quality", "style"}
+                key: value for key, value in request_params.items() if key not in _OPTIONAL_IMAGE_FIELDS
             }
             try:
-                response = client.images.generate(**fallback_params)
+                response = self._call_with_transient_retries(client.images.generate, fallback_params)
                 request_params = fallback_params
             except Exception as fallback_exc:  # noqa: BLE001
-                logger.error("OpenAI Images API generate fallback 失败: error_class=%s", type(fallback_exc).__name__)
-                raise RuntimeError(PROVIDER_REQUEST_FAILURE_MESSAGE) from fallback_exc
+                self._log_provider_error("generate_optional_fallback", fallback_exc, model=req_model)
+                raise RuntimeError(self._safe_request_failure_message(fallback_exc)) from fallback_exc
 
         provider_output_json = self._with_productflow_metadata(
             None,
@@ -209,7 +412,7 @@ class OpenAIImagesClient:
             response,
             model=req_model,
             size=size,
-            provider_request_json={k: v for k, v in request_params.items() if k != "response_format"},
+            provider_request_json=self._sanitize_generate_request_params(request_params),
             provider_output_json=provider_output_json,
         )
 
@@ -223,10 +426,14 @@ class OpenAIImagesClient:
         model: str | None = None,
         quality: str | None = None,
         n: int = 1,
+        output_format: str | None = None,
+        output_compression: int | None = None,
+        background: str | None = None,
+        moderation: str | None = None,
     ) -> list[ImagesAPIResult]:
         client = self._client()
         req_model = model or self.model
-        req_quality = quality or self.quality
+        req_quality = quality or self.quality or "medium"
 
         image_files, image_metadata = self._build_image_files(image)
 
@@ -236,10 +443,19 @@ class OpenAIImagesClient:
             "prompt": prompt,
             "size": size,
             "n": n,
-            "response_format": "b64_json",
         }
+        if req_model != "gpt-image-2":
+            request_params["response_format"] = "b64_json"
         if req_quality:
             request_params["quality"] = req_quality
+        if output_format:
+            request_params["output_format"] = output_format
+        if output_compression is not None:
+            request_params["output_compression"] = output_compression
+        if background:
+            request_params["background"] = background
+        if moderation:
+            request_params["moderation"] = moderation
         if mask is not None:
             mask_file = BytesIO(mask)
             mask_file.name = "mask.png"
@@ -256,35 +472,31 @@ class OpenAIImagesClient:
         requested_image_count = len(image_files)
         effective_image_count = len(image_files)
         try:
-            response = client.images.edit(**request_params)
+            response = self._call_with_transient_retries(client.images.edit, request_params)
         except Exception as exc:  # noqa: BLE001
-            fallback_params = dict(request_params)
-            can_reduce_optional = self._should_retry_without_optional_fields(fallback_params)
-            can_reduce_images = len(image_files) > 1
-            if not can_reduce_optional and not can_reduce_images:
-                logger.error("OpenAI Images API edit 失败: error_class=%s", type(exc).__name__)
-                raise RuntimeError(PROVIDER_REQUEST_FAILURE_MESSAGE) from exc
-            if can_reduce_optional:
-                fallback_params = {
-                    key: value for key, value in fallback_params.items() if key not in {"quality", "style"}
-                }
-                fallback_notes.append(OPTIONAL_FIELDS_FALLBACK_NOTE)
-            if can_reduce_images:
-                fallback_params["image"] = image_files[0]
-                effective_image_count = 1
-                fallback_notes.append(MULTI_IMAGE_FALLBACK_NOTE)
+            if not self._is_optional_parameter_error(exc, request_params):
+                self._log_provider_error("edit", exc, model=req_model)
+                raise RuntimeError(
+                    self._safe_request_failure_message(exc, multiple_images=len(image_files) > 1)
+                ) from exc
+            fallback_params = {
+                key: value for key, value in request_params.items() if key not in _OPTIONAL_IMAGE_FIELDS
+            }
+            fallback_notes.append(OPTIONAL_FIELDS_FALLBACK_NOTE)
             try:
-                response = client.images.edit(**fallback_params)
+                response = self._call_with_transient_retries(client.images.edit, fallback_params)
                 request_params = fallback_params
                 log_params = self._sanitize_edit_request_params(
                     request_params,
                     image_count=effective_image_count,
-                    image_metadata=image_metadata[:effective_image_count],
+                    image_metadata=image_metadata,
                     has_mask=mask is not None,
                 )
             except Exception as fallback_exc:  # noqa: BLE001
-                logger.error("OpenAI Images API edit fallback 失败: error_class=%s", type(fallback_exc).__name__)
-                raise RuntimeError(PROVIDER_REQUEST_FAILURE_MESSAGE) from fallback_exc
+                self._log_provider_error("edit_optional_fallback", fallback_exc, model=req_model)
+                raise RuntimeError(
+                    self._safe_request_failure_message(fallback_exc, multiple_images=len(image_files) > 1)
+                ) from fallback_exc
 
         provider_output_json = self._with_productflow_metadata(
             None,
@@ -328,10 +540,25 @@ class OpenAIImagesClient:
         image_metadata: list[dict[str, str]],
         has_mask: bool,
     ) -> dict[str, Any]:
-        log_params = {k: v for k, v in request_params.items() if k not in {"image", "mask", "response_format"}}
+        log_params = {
+            key: value
+            for key, value in request_params.items()
+            if key not in {"image", "mask", "prompt", "response_format"}
+        }
+        log_params["prompt_length"] = len(str(request_params.get("prompt") or ""))
         log_params["image_count"] = image_count
         log_params["images"] = image_metadata
         log_params["has_mask"] = has_mask
+        return log_params
+
+    @staticmethod
+    def _sanitize_generate_request_params(request_params: dict[str, Any]) -> dict[str, Any]:
+        log_params = {
+            key: value
+            for key, value in request_params.items()
+            if key not in {"prompt", "response_format"}
+        }
+        log_params["prompt_length"] = len(str(request_params.get("prompt") or ""))
         return log_params
 
 
@@ -402,10 +629,22 @@ class OpenAIImagesImageProvider(ImageProvider):
         options: dict[str, Any] = {}
         model = self._optional_tool_text(tool_options.get("model"))
         quality = self._optional_tool_text(tool_options.get("quality"))
+        output_format = self._optional_tool_text(tool_options.get("output_format"))
+        output_compression = tool_options.get("output_compression")
+        background = self._optional_tool_text(tool_options.get("background"))
+        moderation = self._optional_tool_text(tool_options.get("moderation"))
         if model:
             options["model"] = model
         if quality:
             options["quality"] = quality
+        if output_format:
+            options["output_format"] = output_format
+        if isinstance(output_compression, int) and not isinstance(output_compression, bool):
+            options["output_compression"] = output_compression
+        if background:
+            options["background"] = background
+        if moderation:
+            options["moderation"] = moderation
         return options
 
     def _optional_tool_text(self, value: Any) -> str | None:
@@ -462,35 +701,7 @@ class OpenAIImagesImageProvider(ImageProvider):
         )
 
     def _build_context_block(self, poster: PosterGenerationInput) -> str:
-        lines: list[str] = []
-        if poster.product_name:
-            lines.append(f"- Subject: {poster.product_name}")
-        if poster.category:
-            lines.append(f"- Category/type: {poster.category}")
-        if poster.price:
-            lines.append(f"- Price: {poster.price}")
-        if poster.source_note:
-            lines.append(f"- Additional notes: {poster.source_note}")
-        if poster.copy_prompt_mode == "copy" and poster.structured_copy_context:
-            lines.append(
-                "- Available copy text (use only when visible text is requested or clearly useful; "
-                "do not render field names, labels, or context notes):\n"
-                f"{poster.structured_copy_context}"
-            )
-        if poster.reference_images or poster.source_image is not None:
-            reference_paths = {str(reference.path.resolve()) for reference in poster.reference_images}
-            if poster.source_image is not None:
-                reference_paths.add(str(poster.source_image.resolve()))
-            lines.append(f"- Reference image count: {len(reference_paths)}")
-            if poster.source_image is not None:
-                lines.append("- Source product image: input image 1")
-            reference_labels = [
-                f"{reference.label or reference.filename} (role: {reference.role or 'reference'})"
-                for reference in poster.reference_images
-            ]
-            if reference_labels:
-                lines.append(f"- Reference images: {'; '.join(reference_labels)}")
-        return "\n".join(lines) if lines else "- No explicit upstream context."
+        return build_poster_context_block(poster)
 
     def _build_kind_requirements(self, kind: PosterKind, *, visible_text_language_hint: str | None = None) -> str:
         return image_visible_text_requirements(kind, visible_text_language_hint=visible_text_language_hint)

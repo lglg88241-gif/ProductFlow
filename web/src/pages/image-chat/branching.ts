@@ -90,7 +90,7 @@ export interface ImageGenerationRetryMetadata {
 export interface ImageSessionSelectionState {
   selectedGeneratedAssetId: string | null;
   selectedTaskPlaceholderId: string | null;
-  branchBaseAssetId: string | null;
+  currentContextAssetId: string | null;
   selectedReferenceAssetIds: string[];
   pendingGeneratedRoundCount: number | null;
 }
@@ -383,13 +383,6 @@ export function buildImageSessionHistoryTree(
   return sortBranches(branches);
 }
 
-export function requiresImageSessionGenerationBase(
-  rounds: ImageSessionRound[],
-  tasks: ImageSessionGenerationTask[],
-): boolean {
-  return rounds.length > 0 || tasks.some(isImageSessionGenerationTaskActive);
-}
-
 export function findImageHistoryPlaceholder(
   branches: ImageHistoryBranch[],
   placeholderId: string | null,
@@ -461,7 +454,7 @@ export function reconcileImageSessionSelection({
   historyBranches,
   selectedGeneratedAssetId,
   selectedTaskPlaceholderId,
-  branchBaseAssetId,
+  currentContextAssetId,
   selectedReferenceAssetIds,
   availableReferenceAssetIds,
   maxSelectedReferenceCount,
@@ -480,7 +473,7 @@ export function reconcileImageSessionSelection({
 
   let nextSelectedGeneratedAssetId = selectedGeneratedAssetId;
   let nextSelectedTaskPlaceholderId = selectedTaskPlaceholderId;
-  let nextBranchBaseAssetId = branchBaseAssetId;
+  let nextCurrentContextAssetId = currentContextAssetId;
   let nextPendingGeneratedRoundCount = pendingGeneratedRoundCount;
   let generatedRoundCompleted = false;
 
@@ -494,11 +487,11 @@ export function reconcileImageSessionSelection({
     nextSelectedGeneratedAssetId = latestAssetId;
   }
 
-  if (nextBranchBaseAssetId && !roundAssetIds.has(nextBranchBaseAssetId)) {
-    nextBranchBaseAssetId = null;
+  if (nextCurrentContextAssetId && !roundAssetIds.has(nextCurrentContextAssetId)) {
+    nextCurrentContextAssetId = null;
   }
   if (nextSelectedGeneratedAssetId && !nextSelectedTaskPlaceholderId && roundAssetIds.has(nextSelectedGeneratedAssetId)) {
-    nextBranchBaseAssetId = nextSelectedGeneratedAssetId;
+    nextCurrentContextAssetId = nextSelectedGeneratedAssetId;
   }
 
   const prunedReferenceAssetIds = pruneSelectedReferenceIds(
@@ -515,7 +508,7 @@ export function reconcileImageSessionSelection({
       if (!selectedPlaceholderReplacementRound) {
         nextSelectedGeneratedAssetId = latestAssetId;
         if (latestAssetId) {
-          nextBranchBaseAssetId = latestAssetId;
+          nextCurrentContextAssetId = latestAssetId;
         }
       }
     }
@@ -524,7 +517,7 @@ export function reconcileImageSessionSelection({
   return {
     selectedGeneratedAssetId: nextSelectedGeneratedAssetId,
     selectedTaskPlaceholderId: nextSelectedTaskPlaceholderId,
-    branchBaseAssetId: nextBranchBaseAssetId,
+    currentContextAssetId: nextCurrentContextAssetId,
     selectedReferenceAssetIds: sameStringList(selectedReferenceAssetIds, prunedReferenceAssetIds)
       ? selectedReferenceAssetIds
       : prunedReferenceAssetIds,

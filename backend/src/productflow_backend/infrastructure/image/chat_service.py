@@ -70,6 +70,12 @@ class ImageChatService:
         settings = get_runtime_settings()
         self.provider_config = provider_config or resolve_image_provider_config()
         self.provider_kind = self.provider_config.provider_kind
+        if self.provider_kind not in {"mock", "openai_images"}:
+            raise RuntimeError("图片共创会话需要将图片供应商改为 openai_images")
+        if self.provider_kind == "openai_images" and self.provider_config.model != "gpt-image-2":
+            raise RuntimeError(
+                f"图片共创会话需要将图片模型改为 gpt-image-2（当前为 {self.provider_config.model}）"
+            )
         self.prompt_template = settings.prompt_image_chat_template
 
     def generate(
@@ -78,6 +84,7 @@ class ImageChatService:
         size: str,
         history: list[ImageChatTurn],
         manual_reference_images: list[str],
+        current_image_present: bool | None = None,
         previous_response_id: str | None = None,
         tool_options: dict | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -105,6 +112,7 @@ class ImageChatService:
                 size=size,
                 history=history,
                 manual_reference_images=manual_reference_images,
+                current_image_present=current_image_present,
                 tool_options=tool_options,
             )
         if self.provider_kind == "google_gemini_image":
@@ -124,6 +132,7 @@ class ImageChatService:
         manual_reference_images: list[str],
         *,
         candidate_count: int,
+        current_image_present: bool | None = None,
         tool_options: dict | None = None,
     ) -> list[GeneratedChatImage]:
         if candidate_count <= 0:
@@ -134,6 +143,7 @@ class ImageChatService:
                 size=size,
                 history=history,
                 manual_reference_images=manual_reference_images,
+                current_image_present=current_image_present,
                 tool_options=tool_options,
                 candidate_count=candidate_count,
             )
@@ -246,7 +256,7 @@ class ImageChatService:
         )
 
     def _build_prompt(self, prompt: str, history: list[ImageChatTurn], size: str) -> str:
-        recent_turns = history[-8:]
+        recent_turns = history[-20:]
         history_lines = []
         for index, turn in enumerate(recent_turns, start=1):
             role = "User" if turn.role == "user" else "Assistant"
@@ -290,6 +300,7 @@ class ImageChatService:
         size: str,
         history: list[ImageChatTurn],
         manual_reference_images: list[str],
+        current_image_present: bool | None,
         tool_options: dict | None,
     ) -> GeneratedChatImage:
         return self._generate_openai_images_many(
@@ -297,6 +308,7 @@ class ImageChatService:
             size=size,
             history=history,
             manual_reference_images=manual_reference_images,
+            current_image_present=current_image_present,
             tool_options=tool_options,
             candidate_count=None,
         )[0]
@@ -307,6 +319,7 @@ class ImageChatService:
         size: str,
         history: list[ImageChatTurn],
         manual_reference_images: list[str],
+        current_image_present: bool | None,
         tool_options: dict | None,
         candidate_count: int | None,
     ) -> list[GeneratedChatImage]:
@@ -314,7 +327,11 @@ class ImageChatService:
         full_prompt = self._build_prompt(prompt=prompt, history=history, size=size)
         request_options = self._images_api_request_options(tool_options, candidate_count=candidate_count)
 
-        reference_images = self._collect_images_api_references(history, manual_reference_images)
+        reference_images = self._collect_images_api_references(
+            history,
+            manual_reference_images,
+            current_image_present=current_image_present,
+        )
         if reference_images:
             results = client.edit(image=reference_images, prompt=full_prompt, size=size, **request_options)
         else:
@@ -328,14 +345,26 @@ class ImageChatService:
         *,
         candidate_count: int | None,
     ) -> dict[str, Any]:
-        options: dict[str, Any] = {}
+        options: dict[str, Any] = {"quality": "medium"}
         if isinstance(tool_options, dict):
             model = self._optional_tool_text(tool_options.get("model"))
             quality = self._optional_tool_text(tool_options.get("quality"))
+            output_format = self._optional_tool_text(tool_options.get("output_format"))
+            output_compression = tool_options.get("output_compression")
+            background = self._optional_tool_text(tool_options.get("background"))
+            moderation = self._optional_tool_text(tool_options.get("moderation"))
             if model:
                 options["model"] = model
             if quality:
                 options["quality"] = quality
+            if output_format:
+                options["output_format"] = output_format
+            if isinstance(output_compression, int) and not isinstance(output_compression, bool):
+                options["output_compression"] = output_compression
+            if background:
+                options["background"] = background
+            if moderation:
+                options["moderation"] = moderation
         n = candidate_count or 1
         options["n"] = max(1, min(10, n))
         return options
@@ -349,7 +378,7 @@ class ImageChatService:
             prompt_version=self.prompt_version,
             size=size,
             generated_at=result.generated_at,
-            provider_response_id=None,
+            provider_response_id=result.provider_request_id,
             previous_response_id=None,
             image_generation_call_id=None,
             provider_request_json=result.provider_request_json,
@@ -393,36 +422,23 @@ class ImageChatService:
         self,
         history: list[ImageChatTurn],
         manual_reference_images: list[str],
+        *,
+        current_image_present: bool | None = None,
     ) -> list[ImagesReferenceImage]:
+        # Free-form sessions pass the current work followed by pinned
+        # references explicitly. Historical candidates are text context only.
         references: list[ImagesReferenceImage] = []
-        has_base_image = False
-        for turn in reversed(history):
-            if turn.role == "assistant" and turn.image_data_url:
-                ref = decode_reference_data_url(turn.image_data_url)
-                references.append(
-                    ImagesReferenceImage(
-                        bytes_data=ref.bytes_data,
-                        mime_type=ref.mime_type,
-                        filename="base.png",
-                    )
-                )
-                has_base_image = True
-                break
-        manual_images = manual_reference_images[:5] if has_base_image else manual_reference_images[:6]
-        reference_index = 1
-        for index, data_url in enumerate(manual_images, start=1):
+        has_current_image = (
+            current_image_present if current_image_present is not None else bool(manual_reference_images)
+        )
+        for index, data_url in enumerate(manual_reference_images[:6], start=1):
             ref = decode_reference_data_url(data_url)
-            if not has_base_image and index == 1:
-                filename = "base.png"
-                has_base_image = True
-            else:
-                filename = f"reference-{reference_index}.png"
-                reference_index += 1
+            reference_index = index - 1 if has_current_image else index
             references.append(
                 ImagesReferenceImage(
                     bytes_data=ref.bytes_data,
                     mime_type=ref.mime_type,
-                    filename=filename,
+                    filename="base.png" if has_current_image and index == 1 else f"reference-{reference_index}.png",
                 )
             )
         return references
