@@ -465,12 +465,14 @@ def phase_settings_and_security(r: DemoRunner) -> None:
     def deletion_guard() -> str:
         if r.created_product_id is None:
             raise DemoSkip("没有可测商品")
+        # 幂等：显式关闭后再验证护栏（前次运行的 DB 状态可能残留）
+        r.client.patch("/api/settings", json={"values": {"deletion_enabled": False}})
         response = r.client.delete(f"/api/products/{r.created_product_id}")
-        assert response.status_code == 403, response.status_code
-        r.deletion_enabled = True
+        assert response.status_code == 403, f"期望 403 实得 {response.status_code}"
         patched = r.client.patch("/api/settings", json={"values": {"deletion_enabled": True}})
         patched.raise_for_status()
-        return "删除开关默认关闭已验证"
+        r.deletion_enabled = True
+        return "护栏验证通过（关闭时 403），已重新开启供清理"
 
     r.step("安全", "业务删除开关护栏", deletion_guard)
 
