@@ -184,7 +184,9 @@ class LocalStorage:
 
     def _save_variant_image(self, image: Image.Image, destination: Path) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = destination.parent / f".{destination.name}.{uuid4().hex}.tmp"
+        # Keep temp names short: long asset stems plus the uuid suffix can push
+        # Windows paths past MAX_PATH and silently break variant generation.
+        temp_path = destination.parent / f".{uuid4().hex}.tmp"
 
         if destination.suffix == ".webp":
             image.save(temp_path, format="WEBP", quality=84, method=6)

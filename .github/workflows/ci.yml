@@ -4,9 +4,13 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
-    name: Backend (ruff + pytest)
+    name: Backend (ruff + pytest + coverage + audit)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -22,11 +26,13 @@ jobs:
         run: uv sync --frozen --extra dev
       - name: Lint
         run: uv run ruff check .
-      - name: Test
-        run: uv run pytest -q
+      - name: Test with coverage
+        run: uv run pytest -q --cov --cov-report=term-missing --cov-fail-under=88
+      - name: Dependency audit
+        run: uv run pip-audit
 
   web:
-    name: Web (eslint + vitest + build)
+    name: Web (eslint + vitest + build + audit)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -49,3 +55,5 @@ jobs:
         run: pnpm test:run
       - name: Build (tsc + vite)
         run: pnpm build
+      - name: Dependency audit
+        run: pnpm audit --audit-level=high

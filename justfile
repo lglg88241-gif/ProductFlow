@@ -24,8 +24,25 @@ backend-worker-prod:
 backend-test:
     uv run --directory backend pytest
 
+backend-lint:
+    uv run --directory backend ruff check .
+
 web-install:
     pnpm --dir web install
+
+web-lint:
+    pnpm --dir web lint
+
+web-test:
+    pnpm --dir web test:run
+
+# 本地一键复现 CI 门禁（CI 的 backend 测试额外带 --cov --cov-fail-under=88）
+ci:
+    just backend-lint
+    just backend-test
+    just web-lint
+    just web-test
+    just web-build
 
 web-dev:
     bash scripts/with_dev_env.sh bash -lc 'web_port="${WEB_PORT:-29283}"; api_target="${VITE_DEV_PROXY_TARGET:-http://127.0.0.1:${APP_PORT:-29282}}"; VITE_API_BASE_URL= VITE_DEV_PROXY_TARGET="$api_target" pnpm --dir web dev -- --host 0.0.0.0 --port "$web_port" --strictPort'

@@ -24,7 +24,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "pip-audit>=2.7.0",
   "pytest>=8.4.1",
+  "pytest-cov>=7.0.0",
   "pytest-mock>=3.14.1",
   "ruff>=0.12.11",
 ]
@@ -39,6 +41,17 @@ packages = ["src/productflow_backend"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src/productflow_backend"]
+omit = ["*/alembic/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]
 
 [tool.ruff]
 line-length = 120
