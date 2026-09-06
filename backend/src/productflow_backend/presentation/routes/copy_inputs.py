@@ -35,7 +35,7 @@ async def extract_copy_input_endpoint(file: UploadFile = File(...)) -> CopyInput
         content = await file.read(TEXT_INPUT_MAX_BYTES + 1)
         if len(content) > TEXT_INPUT_MAX_BYTES:
             raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 detail=f"文案文件超过大小限制: {TEXT_INPUT_MAX_BYTES} bytes",
             )
         if not content:

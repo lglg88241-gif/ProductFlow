@@ -6,9 +6,18 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from productflow_backend.config import get_settings
+from productflow_backend.config import get_settings, invalidate_runtime_settings_cache
 from productflow_backend.infrastructure.db.models import Base
 from productflow_backend.infrastructure.db.session import get_engine, get_session_factory
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_settings_cache():
+    """Runtime settings are cached in-process; start and end every test cold."""
+
+    invalidate_runtime_settings_cache()
+    yield
+    invalidate_runtime_settings_cache()
 
 
 @pytest.fixture()

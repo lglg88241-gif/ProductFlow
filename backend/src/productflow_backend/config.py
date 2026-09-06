@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
@@ -9,8 +11,9 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 ConfigInputType = Literal["text", "password", "number", "boolean", "select", "multi_select", "textarea"]
 IMAGE_SIZE_PATTERN = re.compile(r"^\d+x\d+$")
@@ -764,14 +767,67 @@ def _load_database_config_overrides() -> dict[str, str]:
 
 
 def get_runtime_settings() -> Settings:
-    """Settings with database overrides applied.
+    """Settings with database overrides applied, cached for a short TTL.
 
     If a key does not exist in the database, env/default Settings remains the
     fallback. Missing app_settings table is tolerated so fresh databases can
-    still start before migrations have run.
+    still start before migrations have run. ORM writes to app_settings
+    invalidate the cache automatically (see _on_session_before_commit); the
+    TTL only bounds staleness for readers in other processes (for example the
+    Dramatiq worker).
     """
 
+    global _runtime_settings_cache
+    now = time.monotonic()
+    with _runtime_settings_lock:
+        cached = _runtime_settings_cache
+        if cached is not None and now < cached[0]:
+            return cached[1]
     overrides = _load_database_config_overrides()
     if not overrides:
-        return get_settings()
-    return build_settings_with_overrides(overrides)
+        settings = get_settings()
+    else:
+        settings = build_settings_with_overrides(overrides)
+    with _runtime_settings_lock:
+        _runtime_settings_cache = (now + RUNTIME_SETTINGS_CACHE_TTL_SECONDS, settings)
+    return settings
+
+
+RUNTIME_SETTINGS_CACHE_TTL_SECONDS = 3.0
+APP_SETTINGS_DIRTY_FLAG = "_runtime_settings_app_settings_dirty"
+_runtime_settings_lock = threading.Lock()
+_runtime_settings_cache: tuple[float, Settings] | None = None
+
+
+def invalidate_runtime_settings_cache() -> None:
+    """Drop the cached runtime settings so the next read re-queries app_settings."""
+
+    global _runtime_settings_cache
+    with _runtime_settings_lock:
+        _runtime_settings_cache = None
+
+
+def _on_session_before_flush(session: Session, _flush_context: Any, _instances: Any) -> None:
+    """Remember that the pending flush touches app_settings.
+
+    Registered globally so every write path (settings routes, worker bootstrap,
+    tests seeding rows directly) invalidates without remembering to opt in.
+    Core-level bulk ``update()``/``delete()`` statements bypass the ORM dirty
+    tracking checked here; such writes must invalidate explicitly.
+    """
+
+    if _runtime_settings_cache is None:
+        return
+    from productflow_backend.infrastructure.db.models import AppSetting
+
+    if any(isinstance(obj, AppSetting) for obj in (*session.new, *session.dirty, *session.deleted)):
+        session.info[APP_SETTINGS_DIRTY_FLAG] = True
+
+
+def _on_session_after_commit(session: Session) -> None:
+    if session.info.pop(APP_SETTINGS_DIRTY_FLAG, False):
+        invalidate_runtime_settings_cache()
+
+
+event.listen(Session, "before_flush", _on_session_before_flush)
+event.listen(Session, "after_commit", _on_session_after_commit)

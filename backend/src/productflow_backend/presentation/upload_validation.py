@@ -37,7 +37,7 @@ async def read_validated_image_upload(upload: UploadFile, *, fallback_filename: 
     content = await upload.read(settings.upload_max_image_bytes + 1)
     if len(content) > settings.upload_max_image_bytes:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"图片超过大小限制: {settings.upload_max_image_bytes} bytes",
         )
     if not content:
