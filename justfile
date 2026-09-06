@@ -57,3 +57,11 @@ release:
 
 release-dry-run:
     DRY_RUN=1 bash scripts/release.sh
+
+# 对运行中的实例执行全功能演示（compose 栈或已启动的后端）
+demo:
+    uv run --directory backend python scripts/demo_flow.py
+
+# 一键本地演示：sqlite + mock 供应商（自动迁移 → 起服 → 全功能演示）
+demo-local:
+    bash backend/scripts/demo_local.sh
