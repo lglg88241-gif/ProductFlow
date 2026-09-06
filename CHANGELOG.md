@@ -6,6 +6,14 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Designer Agent (M1)**: conversational design assistant — an LLM tool-calling loop that
+  talks users through creating images without any prompt engineering. Guided dialogue
+  stages (clarify → recommend → produce → review), `generate_image` / `edit_image` /
+  `write_copy` tools reusing the durable generation queue, and a new Design Workbench page
+  (`/workbench`) with chat UI, inline copy proposals, generated-image previews, and
+  linked image-session polling. Backed by new `agent_sessions` / `agent_messages` tables
+  (migration 0031); requires an OpenAI-compatible text provider.
+- Product requirements & architecture spec (`docs/superpowers/specs/2026-09-06-agentic-designer-design.md`).
 - Moments poster templates, poster prompt context, and copy inputs (text, file, and image OCR extraction).
 - Image session messages persistence (migration 0030) with branching-friendly history.
 - Dedicated product-create page and image-chat composer components.

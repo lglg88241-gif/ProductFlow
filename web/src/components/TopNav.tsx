@@ -10,6 +10,7 @@ import {
   Monitor,
   Moon,
   Settings,
+  Sparkles,
   Sun,
   Wand2,
 } from "lucide-react";
@@ -27,6 +28,12 @@ interface TopNavProps {
 }
 
 const navItems = [
+  {
+    labelKey: "nav.workbench",
+    to: "/workbench",
+    icon: Sparkles,
+    match: (pathname: string) => pathname.startsWith("/workbench"),
+  },
   {
     labelKey: "nav.products",
     to: "/products",

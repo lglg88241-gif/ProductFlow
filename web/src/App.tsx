@@ -30,6 +30,9 @@ const ProductListPage = lazy(loadProductListPage);
 const SettingsPage = lazy(() =>
   import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })),
 );
+const WorkbenchPage = lazy(() =>
+  import("./pages/WorkbenchPage").then((module) => ({ default: module.WorkbenchPage })),
+);
 
 function LoadingScreen() {
   const { t } = useI18n();
@@ -74,6 +77,10 @@ function AppRoutes() {
         <Route
           path="/products/new"
           element={authenticated ? <ProductCreatePage /> : <Navigate to="/login" replace />}
+        />
+        <Route
+          path="/workbench"
+          element={authenticated ? <WorkbenchPage /> : <Navigate to="/login" replace />}
         />
         <Route
           path="/image-chat"

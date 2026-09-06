@@ -1,4 +1,10 @@
 import type {
+  AgentSession,
+  AgentSessionDetail,
+  AgentSessionListResponse,
+  AgentTurnResponse,
+} from "./agentTypes";
+import type {
   ApplyWorkflowTemplateGroupInput,
   CanvasTemplateSummary,
   CanvasTemplateListResponse,
@@ -453,5 +459,26 @@ export const api = {
   },
   retryProductWorkflowRun(productId: string, runId: string): Promise<ProductWorkflow> {
     return request(`/api/products/${productId}/workflow/runs/${runId}/retry`, { method: "POST" });
+  },
+  listAgentSessions(): Promise<AgentSessionListResponse> {
+    return request("/api/agent/sessions");
+  },
+  createAgentSession(input: { title?: string }): Promise<AgentSession> {
+    return request("/api/agent/sessions", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  },
+  getAgentSession(sessionId: string): Promise<AgentSessionDetail> {
+    return request(`/api/agent/sessions/${sessionId}`);
+  },
+  deleteAgentSession(sessionId: string): Promise<void> {
+    return request(`/api/agent/sessions/${sessionId}`, { method: "DELETE" });
+  },
+  sendAgentMessage(sessionId: string, content: string): Promise<AgentTurnResponse> {
+    return request(`/api/agent/sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    });
   },
 };

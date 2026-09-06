@@ -25,6 +25,7 @@ from productflow_backend.infrastructure.queue import (
     recover_unfinished_workflow_runs,
 )
 from productflow_backend.presentation.errors import register_exception_handlers
+from productflow_backend.presentation.routes.agent import router as agent_router
 from productflow_backend.presentation.routes.auth import router as auth_router
 from productflow_backend.presentation.routes.copy_inputs import router as copy_inputs_router
 from productflow_backend.presentation.routes.gallery import router as gallery_router
@@ -79,6 +80,7 @@ def create_app() -> FastAPI:
     def healthcheck() -> dict[str, object]:
         return {"status": "ok", "admin_access_required": get_runtime_settings().admin_access_required}
 
+    app.include_router(agent_router)
     app.include_router(auth_router)
     app.include_router(copy_inputs_router)
     app.include_router(generation_queue_router)

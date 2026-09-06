@@ -598,3 +598,52 @@ class ImageGalleryEntry(Base):
 
     asset: Mapped[ImageSessionAsset] = relationship(foreign_keys=[image_session_asset_id])
     round: Mapped[ImageSessionRound | None] = relationship(foreign_keys=[image_session_round_id])
+
+
+class AgentSession(Base):
+    """设计师 Agent 会话：对话式制图的主入口。"""
+
+    __tablename__ = "agent_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    title: Mapped[str] = mapped_column(String(120), default="设计师会话")
+    stage: Mapped[str] = mapped_column(String(20), default="clarify")
+    image_session_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("image_sessions.id", ondelete="SET NULL", name="fk_agent_sessions_image_session_id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    messages: Mapped[list[AgentMessage]] = relationship(
+        back_populates="agent_session",
+        cascade="all, delete-orphan",
+        order_by="AgentMessage.created_at",
+    )
+
+
+class AgentMessage(Base):
+    """设计师 Agent 会话消息：user/assistant/tool 轮次与工具调用记录。"""
+
+    __tablename__ = "agent_messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant', 'tool')", name="ck_agent_messages_role"),
+        Index("ix_agent_messages_session_created", "session_id", "created_at", "id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    content: Mapped[str] = mapped_column(Text, default="")
+    tool_calls_json: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    image_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    agent_session: Mapped[AgentSession] = relationship(back_populates="messages")
