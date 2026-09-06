@@ -522,13 +522,46 @@ def resolve_text_provider_config() -> ResolvedTextProviderConfig:
         session.close()
 
 
+def _image_config_from_env() -> ResolvedImageProviderConfig | None:
+    """.env 直读的生图配置（IMAGE_* 环境变量）。
+
+    绑定是 mock/未配置时启用；界面上配置的 image 绑定优先于此。
+    中转 API 场景：IMAGE_PROVIDER_KIND=openai_images + 地址/key +
+    IMAGE_GENERATE_MODEL（默认 gpt-image-2）。
+    """
+    from productflow_backend.config import get_settings
+
+    settings = get_settings()
+    kind = settings.image_provider_kind
+    if kind not in {"openai_responses", "openai_images", "google_gemini_image"}:
+        return None
+    if not settings.image_api_key or not settings.image_base_url:
+        return None
+    return ResolvedImageProviderConfig(
+        provider_kind=kind,  # type: ignore[arg-type]
+        model=settings.image_generate_model,
+        api_key=settings.image_api_key,
+        base_url=settings.image_base_url,
+        images_quality=settings.image_images_quality if kind == "openai_images" else None,
+        images_style=settings.image_images_style if kind == "openai_images" else None,
+        responses_background_enabled=(
+            settings.image_responses_background_enabled if kind == "openai_responses" else False
+        ),
+        gemini_api_version="v1beta" if kind == "google_gemini_image" else "v1beta",
+    )
+
+
 def resolve_image_provider_config() -> ResolvedImageProviderConfig:
+    """生图供应商解析。优先级：界面配置的 image 绑定（openai_*）> .env 的 IMAGE_* > mock。"""
     session = get_session_factory()()
     try:
         ensure_provider_config_bootstrapped(session)
         binding = _require_binding(session, IMAGE_PURPOSE)
         kind = binding.provider_kind
         if kind == "mock":
+            env_config = _image_config_from_env()
+            if env_config is not None:
+                return env_config
             return ResolvedImageProviderConfig(
                 provider_kind="mock",
                 model=_require_text_value(binding.model_settings_json, "model", "图片模型未配置"),

@@ -13,7 +13,10 @@ from productflow_backend.application.designer_agent.llm import (
     AgentLLMResponse,
     FallbackAgentLLMClient,
 )
-from productflow_backend.infrastructure.provider_config import resolve_agent_provider_config
+from productflow_backend.infrastructure.provider_config import (
+    resolve_agent_provider_config,
+    resolve_image_provider_config,
+)
 
 
 class FlakyLLM:
@@ -245,3 +248,50 @@ def test_ui_binding_overrides_env_variables(
     assert resolved.api_key is None or resolved.base_url != "https://env.example.com/v1"
     assert resolved.base_url == "https://ui.example.com/v1"
     assert resolved.provider_profile_id == profile_id
+
+
+def test_image_config_falls_back_to_env_variables(configured_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """生图绑定保持 mock 时，.env 的 IMAGE_* 直读生效（中转 gpt-image-2 场景）。"""
+    monkeypatch.setenv("IMAGE_PROVIDER_KIND", "openai_images")
+    monkeypatch.setenv("IMAGE_API_KEY", "relay-image-key")
+    monkeypatch.setenv("IMAGE_BASE_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("IMAGE_GENERATE_MODEL", "gpt-image-2")
+    from productflow_backend.config import get_settings, invalidate_runtime_settings_cache
+
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+
+    resolved = resolve_image_provider_config()
+    assert resolved.provider_kind == "openai_images"
+    assert resolved.model == "gpt-image-2"
+    assert resolved.api_key == "relay-image-key"
+    assert resolved.base_url == "https://relay.example.com/v1"
+
+    # 界面上配置的 image 绑定（openai_*）优先于 env
+    from productflow_backend.presentation.api import create_app
+
+    unlocked_client = TestClient(create_app())
+    _login(unlocked_client)
+    _unlock_settings(unlocked_client)
+    profile_id = _create_text_profile(unlocked_client, name="中转生图", base_url="https://relay.example.com/v1")
+    # 给档案补 image 能力标注（仅展示用）
+    updated_profile = unlocked_client.patch(
+        f"/api/settings/provider-profiles/{profile_id}",
+        json={"capabilities": ["text_responses", "image_images"], "enabled": True},
+    )
+    assert updated_profile.status_code == 200
+    bound = unlocked_client.patch(
+        "/api/settings/provider-bindings/image",
+        json={
+            "provider_kind": "openai_images",
+            "provider_profile_id": profile_id,
+            "model_settings": {"model": "gpt-image-2"},
+            "config": {},
+        },
+    )
+    assert bound.status_code == 200, bound.text
+    resolved_after = resolve_image_provider_config()
+    assert resolved_after.provider_profile_id == profile_id
+    assert resolved_after.base_url == "https://relay.example.com/v1"
+
+

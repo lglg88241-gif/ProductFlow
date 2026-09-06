@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     image_provider_kind: str = "mock"
     image_api_key: str | None = None
     image_base_url: str | None = None
-    image_generate_model: str = "gpt-5.4"
+    image_generate_model: str = "gpt-image-2"
     image_images_quality: str | None = "medium"
     image_images_style: str | None = None
     image_responses_background_enabled: bool = False
