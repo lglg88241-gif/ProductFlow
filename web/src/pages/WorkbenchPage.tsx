@@ -4,7 +4,13 @@ import { Loader2, Paperclip, Plus, Send } from "lucide-react";
 
 import { TopNav } from "../components/TopNav";
 import { api } from "../lib/api";
-import type { AgentAssetEntry, AgentSessionDetail, AgentToolEvent } from "../lib/agentTypes";
+import type {
+  AgentAssetEntry,
+  AgentCopyReport,
+  AgentDesignRecommendation,
+  AgentSessionDetail,
+  AgentToolEvent,
+} from "../lib/agentTypes";
 import { useI18n } from "../lib/preferences";
 import type { ImageSessionRound } from "../lib/types";
 
@@ -102,11 +108,80 @@ function TemplateProfile({ event }: { event: AgentToolEvent }) {
   );
 }
 
-function ToolEventCard({ event }: { event: AgentToolEvent }) {
+function RecommendationCards({
+  event,
+  onPick,
+}: {
+  event: AgentToolEvent;
+  onPick: (message: string) => void;
+}) {
+  const { t } = useI18n();
+  const recommendations = event.result.recommendations ?? [];
+  if (recommendations.length === 0) {
+    return event.result.message ? (
+      <p className="mt-2 text-sm text-slate-500">{event.result.message}</p>
+    ) : null;
+  }
+  return (
+    <div className="mt-2 grid gap-2 sm:grid-cols-3">
+      {recommendations.map((item: AgentDesignRecommendation) => (
+        <div key={item.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+          <a href={item.download_url} target="_blank" rel="noreferrer">
+            <img src={item.preview_url} alt={item.title} className="h-28 w-full object-cover" />
+          </a>
+          <div className="space-y-1 p-2">
+            <p className="text-xs font-medium text-slate-800">{item.title}</p>
+            <p className="text-xs text-slate-500">{item.why}</p>
+            <button
+              type="button"
+              onClick={() => onPick(t("workbench.pickTemplate", { title: item.title }))}
+              className="w-full rounded-lg bg-slate-900 px-2 py-1 text-xs font-medium text-white hover:bg-slate-700"
+            >
+              {t("workbench.useThis")}
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CopyReportCard({ event }: { event: AgentToolEvent }) {
+  const { t } = useI18n();
+  const report: AgentCopyReport | undefined = event.result.report;
+  if (!report) return null;
+  return (
+    <div className="mt-2 space-y-2 rounded-xl border border-slate-200 bg-white p-3 text-sm">
+      {report.headline ? <p className="text-base font-semibold text-slate-900">{report.headline}</p> : null}
+      {report.moments_caption ? (
+        <p className="whitespace-pre-wrap text-slate-800">{report.moments_caption}</p>
+      ) : null}
+      {report.selling_points && report.selling_points.length > 0 ? (
+        <ul className="list-inside list-disc text-xs text-slate-600">
+          {report.selling_points.map((point, index) => (
+            <li key={index}>{point}</li>
+          ))}
+        </ul>
+      ) : null}
+      {report.hashtags && report.hashtags.length > 0 ? (
+        <p className="text-xs text-slate-500">{report.hashtags.map((tag) => `#${tag}`).join(" ")}</p>
+      ) : null}
+      {report.publishing_tips ? (
+        <p className="rounded-lg bg-amber-50 p-2 text-xs text-amber-700">
+          {t("workbench.report.tips")}: {report.publishing_tips}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function ToolEventCard({ event, onPick }: { event: AgentToolEvent; onPick: (message: string) => void }) {
   if (event.tool === "write_copy") return <CopyProposals event={event} />;
   if (event.tool === "generate_image" || event.tool === "edit_image") return <GeneratedImages event={event} />;
   if (event.tool === "search_assets") return <AssetMatches event={event} />;
   if (event.tool === "analyze_template") return <TemplateProfile event={event} />;
+  if (event.tool === "recommend_designs") return <RecommendationCards event={event} onPick={onPick} />;
+  if (event.tool === "write_copy_report") return <CopyReportCard event={event} />;
   return null;
 }
 
@@ -264,7 +339,11 @@ export function WorkbenchPage() {
               </div>
             ) : null}
             {(sendMutation.data?.tool_events ?? []).map((event, index) => (
-              <ToolEventCard key={`event-${index}`} event={event} />
+              <ToolEventCard
+                key={`event-${index}`}
+                event={event}
+                onPick={(message: string) => sendMutation.mutate(message)}
+              />
             ))}
             {rounds.length > 0 ? (
               <div className="rounded-xl border border-slate-200 bg-white p-3">

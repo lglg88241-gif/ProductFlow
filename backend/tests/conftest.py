@@ -85,16 +85,24 @@ class ScriptedAgentLLM:
     provider_name = "scripted"
     model = "scripted-model"
 
-    def __init__(self, script, vision_response: dict | None = None) -> None:
+    def __init__(
+        self,
+        script,
+        vision_response: dict | None = None,
+        utility_responses: dict[str, str] | None = None,
+    ) -> None:
         self.script = list(script)
         self.vision_response = vision_response or {}
+        self.utility_responses = utility_responses or {}
         self.calls: list[dict] = []
         self.image_calls = 0
 
-    def chat(self, *, messages, tools):
+    def chat(self, *, messages, tools, intent: str = ""):
         from productflow_backend.application.designer_agent.llm import AgentLLMResponse
 
-        self.calls.append({"messages": [dict(item) for item in messages], "tools": tools})
+        self.calls.append({"messages": [dict(item) for item in messages], "tools": tools, "intent": intent})
+        if intent in self.utility_responses:
+            return AgentLLMResponse(content=self.utility_responses[intent], model=self.model)
         content = messages[-1].get("content") if messages else None
         if isinstance(content, list):
             self.image_calls += 1
@@ -108,8 +116,12 @@ class ScriptedAgentLLM:
 def install_scripted_llm(monkeypatch: pytest.MonkeyPatch):
     """把剧本化假 LLM 注入 designer agent 循环。"""
 
-    def _install(script: list, vision_response: dict | None = None) -> ScriptedAgentLLM:
-        client = ScriptedAgentLLM(script, vision_response=vision_response)
+    def _install(
+        script: list,
+        vision_response: dict | None = None,
+        utility_responses: dict[str, str] | None = None,
+    ) -> ScriptedAgentLLM:
+        client = ScriptedAgentLLM(script, vision_response=vision_response, utility_responses=utility_responses)
         monkeypatch.setattr(
             "productflow_backend.application.designer_agent.loop.build_agent_llm_client",
             lambda: client,

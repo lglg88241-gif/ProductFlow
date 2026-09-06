@@ -46,6 +46,8 @@ export interface AgentToolEvent {
     }>;
     copies?: Array<{ title?: string; content?: string; hashtags?: string[] }>;
     matches?: AgentAssetEntry[];
+    recommendations?: AgentDesignRecommendation[];
+    report?: AgentCopyReport;
     template_profile?: Record<string, unknown> | null;
     tags?: string[];
     title?: string;
@@ -67,6 +69,19 @@ export interface AgentAssetEntry {
   preview_url: string;
   thumbnail_url: string;
   created_at: string;
+}
+
+export interface AgentDesignRecommendation extends AgentAssetEntry {
+  why: string;
+}
+
+export interface AgentCopyReport {
+  headline?: string;
+  moments_caption?: string;
+  selling_points?: string[];
+  hashtags?: string[];
+  publishing_tips?: string;
+  [key: string]: unknown;
 }
 
 export interface AgentAssetListResponse {

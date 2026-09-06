@@ -11,7 +11,7 @@ from productflow_backend.application.asset_library import (
     register_generated_asset,
     search_asset_entries,
 )
-from productflow_backend.application.designer_agent.llm import AgentLLMClient
+from productflow_backend.application.designer_agent.llm import AgentLLMClient, AgentLLMError
 from productflow_backend.application.image_sessions import (
     create_image_session,
     get_image_session_detail,
@@ -124,10 +124,46 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "asset_id": {"type": "string", "description": "图片会话中的资产 id"},
+                        "asset_id": {"type": "string", "description": "图片会话中的资产 id，缺省保存最新产出"},
                         "title": {"type": "string", "description": "可选，素材命名"},
                     },
-                    "required": ["asset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "recommend_designs",
+                "description": "结合用户需求检索素材库，产出 2-3 个带理由的设计方案推荐。用户没头绪时主动使用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "requirement": {
+                            "type": "string",
+                            "description": "用户需求概括：行业/活动/想要的感觉",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["template", "reference", "output", "brand"],
+                            "description": "可选，限定检索的素材类型",
+                        },
+                    },
+                    "required": ["requirement"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_copy_report",
+                "description": "产出一份完整文案报告：标题、朋友圈正文、卖点清单、话题标签与发布建议。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "brief": {"type": "string", "description": "产品/活动/受众/目标"},
+                        "tone": {"type": "string", "description": "可选，语气偏好（亲切/高端/促销感）"},
+                    },
+                    "required": ["brief"],
                 },
             },
         },
@@ -265,7 +301,12 @@ def execute_tool(
                 agent_session_id=agent_session.id,
                 image_session_id=image_session_id,
             )
+            _auto_tag_entry(db, entry, llm)
             return {"status": "completed", "message": "已存入素材库。", **_asset_summary(entry)}
+        if name == "recommend_designs":
+            return _run_recommend_designs(db, llm, arguments)
+        if name == "write_copy_report":
+            return _run_write_copy_report(llm, arguments)
         return {"status": "error", "message": f"未知工具: {name}"}
     except Exception as exc:  # noqa: BLE001 - 面向用户的工具错误必须转译
         return {"status": "error", "message": _friendly_generation_error(exc), "detail": str(exc)[:200]}
@@ -320,3 +361,114 @@ def _run_write_copy(llm: AgentLLMClient, arguments: dict[str, Any]) -> dict[str,
     if not copies and response.content:
         copies = [{"title": "", "content": response.content.strip(), "hashtags": []}]
     return {"status": "completed", "kind": kind, "copies": copies}
+
+_RECOMMEND_RATIONALE_PROMPT = """你是资深设计师。针对用户需求，为每个候选模板写一句"为什么适合"的推荐理由。
+只返回 JSON 数组（与候选顺序一致），每项形如 {{"asset_id": "...", "why": "一句话理由（结合模板风格与用户需求）"}}。
+用户需求：{requirement}
+候选模板（含档案）：
+{candidates}
+"""
+
+_COPY_REPORT_PROMPT = """你是资深营销文案师。根据需求输出一份完整的文案报告，只返回 JSON 对象：
+{{
+  "headline": "主标题",
+  "moments_caption": "朋友圈正文（2-4 行，口语化，有行动号召）",
+  "selling_points": ["卖点1", "卖点2", "卖点3"],
+  "hashtags": ["话题标签"],
+  "publishing_tips": "发布建议（时间/配图张数/互动引导）"
+}}
+不要包含其他文字或代码块标记。
+需求：{brief}
+语气：{tone}
+"""
+
+
+def _auto_tag_entry(db: Session, entry, llm: AgentLLMClient) -> None:
+    """成品入库时顺手做视觉打标（失败静默，不影响保存结果）。"""
+    try:
+        analyze_asset(db, entry, llm)
+        entry.template_profile_json = None  # 成品不是模板，只保留标签
+        db.commit()
+        db.refresh(entry)
+    except Exception:  # noqa: BLE001 - 打标是增强能力，任何失败都不阻塞保存
+        db.rollback()
+
+
+def _run_recommend_designs(db: Session, llm: AgentLLMClient, arguments: dict[str, Any]) -> dict[str, Any]:
+    requirement = str(arguments.get("requirement", "")).strip()
+    if not requirement:
+        return {"status": "error", "message": "推荐需求为空，先弄清楚用户想要什么。"}
+    candidates = search_asset_entries(db, requirement, kind=arguments.get("kind"), limit=3)
+    if not candidates:
+        return {
+            "status": "completed",
+            "recommendations": [],
+            "message": "素材库里还没有匹配的样板，可以上传一张模板图，或者我直接按需求新画。",
+        }
+    rationale_map: dict[str, str] = {}
+    try:
+        candidates_text = json.dumps(
+            [
+                {"asset_id": entry.id, "title": entry.title, "profile": entry.template_profile_json}
+                for entry in candidates
+            ],
+            ensure_ascii=False,
+            indent=1,
+        )
+        prompt_text = _RECOMMEND_RATIONALE_PROMPT.format(requirement=requirement, candidates=candidates_text)
+        response = llm.chat(
+            messages=[{"role": "user", "content": prompt_text}],
+            tools=[],
+            intent="recommend_rationales",
+        )
+        if response.content:
+            parsed = json.loads(response.content.strip().removeprefix("```json").strip("` \n"))
+            if isinstance(parsed, list):
+                rationale_map = {
+                    str(item.get("asset_id")): str(item.get("why", ""))
+                    for item in parsed
+                    if isinstance(item, dict) and item.get("asset_id")
+                }
+    except (AgentLLMError, ValueError, TypeError):
+        rationale_map = {}
+    recommendations = []
+    for entry in candidates:
+        summary = _asset_summary(entry)
+        recommendations.append(
+            {
+                **summary,
+                "why": rationale_map.get(entry.id, "风格与你的需求接近。"),
+            }
+        )
+    return {
+        "status": "completed",
+        "requirement": requirement,
+        "recommendations": recommendations,
+        "message": f"为你挑了 {len(recommendations)} 个方案，选中后我可以直接按它出图。",
+    }
+
+
+def _run_write_copy_report(llm: AgentLLMClient, arguments: dict[str, Any]) -> dict[str, Any]:
+    brief = str(arguments.get("brief", "")).strip()
+    if not brief:
+        return {"status": "error", "message": "报告需求为空，先明确产品和活动。"}
+    tone = str(arguments.get("tone", "")).strip() or "亲切自然"
+    response = llm.chat(
+        messages=[{"role": "user", "content": _COPY_REPORT_PROMPT.format(brief=brief, tone=tone)}],
+        tools=[],
+        intent="copy_report",
+    )
+    report: dict[str, Any] = {}
+    if response.content:
+        try:
+            cleaned = response.content.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("```")[1].removeprefix("json").strip()
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                report = parsed
+        except (TypeError, ValueError):
+            report = {}
+    if not report:
+        report = {"moments_caption": (response.content or "").strip()}
+    return {"status": "completed", "report": report}

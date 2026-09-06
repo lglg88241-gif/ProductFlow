@@ -38,6 +38,7 @@ class AgentLLMClient(Protocol):
         *,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        intent: str = "",
     ) -> AgentLLMResponse: ...
 
 
@@ -54,7 +55,9 @@ class OpenAICompatAgentClient:
         *,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        intent: str = "",
     ) -> AgentLLMResponse:
+        _ = intent  # 工具内部调用的意图标记仅用于测试分流，生产实现忽略
         try:
             response = self._client.chat.completions.create(
                 model=self.model,

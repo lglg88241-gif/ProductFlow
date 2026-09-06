@@ -6,6 +6,12 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Designer Agent (M3)**: `recommend_designs` produces 2-3 recommendation cards
+  (retrieved templates + per-candidate rationale, selectable in the workbench);
+  `write_copy_report` delivers a full copy report (headline, Moments caption, selling
+  points, hashtags, publishing tips); generated assets are auto-tagged by the vision
+  model on save; the full novice-user acceptance script (clarify → recommend → copy →
+  generate → archive) is now a deterministic replay test.
 - **Designer Agent (M2)**: asset library — new `asset_library` table (migration 0032) with
   kinds (template/reference/output/brand), vision auto-annotation, and session traceability;
   template image upload with structured visual analysis (layout/palette/copy slots/mood);
