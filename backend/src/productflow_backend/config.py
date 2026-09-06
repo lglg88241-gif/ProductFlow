@@ -128,7 +128,8 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 29280
     backend_cors_origins: str = "http://localhost:29281,http://127.0.0.1:29281"
-    session_cookie_secure: bool = False
+    # None = 未显式配置；production 环境默认开启，development 默认关闭。
+    session_cookie_secure: bool | None = None
 
     admin_access_key: str = Field(min_length=8)
     settings_access_token: str | None = None
@@ -246,6 +247,12 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_image_tool_allowed_fields(cls, value: Any) -> str:
         return normalize_image_tool_allowed_fields(value)
+
+    @model_validator(mode="after")
+    def _resolve_session_cookie_secure(self) -> Settings:
+        if self.session_cookie_secure is None:
+            self.session_cookie_secure = self.app_env.strip().lower() == "production"
+        return self
 
     @model_validator(mode="after")
     def _validate_distinct_settings_token(self) -> Settings:

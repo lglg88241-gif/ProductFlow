@@ -42,6 +42,7 @@ services:
       APP_HOST: 0.0.0.0
       APP_PORT: 29280
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:29281,http://127.0.0.1:29281}
+      # 公网部署（HTTPS 反代之后）务必改为 true；纯 HTTP 内网访问保持 false。
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       ADMIN_ACCESS_KEY: ${ADMIN_ACCESS_KEY:?set ADMIN_ACCESS_KEY in .env}
       SETTINGS_ACCESS_TOKEN: ${SETTINGS_ACCESS_TOKEN:?set SETTINGS_ACCESS_TOKEN in .env}

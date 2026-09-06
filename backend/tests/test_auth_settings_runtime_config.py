@@ -1524,3 +1524,27 @@ def test_healthz_reports_runtime_auth_flag(configured_env: Path) -> None:
     patched = client.patch("/api/settings", json={"values": {"admin_access_required": False}})
     assert patched.status_code == 200
     assert client.get("/healthz").json()["admin_access_required"] is False
+
+
+def test_session_cookie_secure_defaults_by_environment(
+    configured_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from productflow_backend.config import invalidate_runtime_settings_cache
+
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+
+    monkeypatch.setenv("APP_ENV", "development")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+    assert get_settings().session_cookie_secure is False
+
+    monkeypatch.setenv("APP_ENV", "production")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+    assert get_settings().session_cookie_secure is True
+
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+    assert get_settings().session_cookie_secure is False

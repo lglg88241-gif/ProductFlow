@@ -2,6 +2,33 @@
 
 All notable changes for ProductFlow are recorded here.
 
+## Unreleased
+
+### Added
+
+- Moments poster templates, poster prompt context, and copy inputs (text, file, and image OCR extraction).
+- Image session messages persistence (migration 0030) with branching-friendly history.
+- Dedicated product-create page and image-chat composer components.
+- End-to-end operator journey smoke test covering login, product creation, workflow runs, deliverable downloads, gallery, runtime config, deletion, and logout.
+- GitHub Actions CI with coverage gate (`--cov-fail-under=88`, baseline 90%), ruff, vitest, build, and pip-audit / pnpm audit dependency-vulnerability gates.
+
+### Changed
+
+- Runtime settings reads are cached for 3 seconds; ORM writes to app settings invalidate the cache automatically.
+- Settings export redacts provider API keys (`__redacted__<last4>`); re-import keeps existing keys for matching profile ids and stores none for unknown profiles.
+- `SESSION_COOKIE_SECURE` now defaults by environment when unset: enabled in production, disabled in development.
+- Product screenshots and hero image compressed to 1600px/256-color without changing references.
+
+### Security
+
+- Production environments (`APP_ENV=production`) reject disabling the admin access key through runtime config or settings import.
+- `/healthz` now reports `admin_access_required`; startup logs warn when auth is disabled or secure cookies are off.
+- Docker Compose publishes Postgres/Redis host ports on 127.0.0.1 only.
+
+### Fixed
+
+- Thumbnail variant generation silently falling back to originals on Windows when long asset stems pushed temp-file paths past MAX_PATH.
+
 ## 0.1.0 - 2026-05-02
 
 Initial public self-hosted release for ProductFlow. This entry is the durable release record for `v0.1.0`.

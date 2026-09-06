@@ -5,6 +5,8 @@
 # ProductFlow
 
 [中文](README.md) | English
+
+[![CI](https://github.com/lglg88241-gif/ProductFlow/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lglg88241-gif/ProductFlow/actions/workflows/ci.yml)
 <p align="center">
   <a href="https://draw.devbin.de"><strong>Live Demo / 体验站</strong></a>
 </p>

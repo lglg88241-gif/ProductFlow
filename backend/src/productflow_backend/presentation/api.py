@@ -52,6 +52,10 @@ def create_app() -> FastAPI:
         recover_unfinished_image_session_generation_tasks()
         if not get_runtime_settings().admin_access_required:
             logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
+        if not get_settings().session_cookie_secure:
+            logging.getLogger(__name__).warning(
+                "SESSION_COOKIE_SECURE 未开启：会话 Cookie 将通过非加密连接传输（公网部署请配置 HTTPS 并开启）"
+            )
         yield
 
     app = FastAPI(title="ProductFlow API", version="0.1.0", lifespan=lifespan)
