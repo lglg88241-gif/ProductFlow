@@ -14,6 +14,7 @@ from productflow_backend.infrastructure.db.session import get_session_factory
 
 TEXT_PURPOSE = "text"
 IMAGE_PURPOSE = "image"
+AGENT_PURPOSE = "agent"
 PROVIDER_TYPE_OPENAI_COMPATIBLE = "openai_compatible"
 PROVIDER_TYPE_GOOGLE_GEMINI = "google_gemini"
 PROVIDER_TYPES = {PROVIDER_TYPE_OPENAI_COMPATIBLE, PROVIDER_TYPE_GOOGLE_GEMINI}
@@ -21,7 +22,8 @@ PROVIDER_TYPES = {PROVIDER_TYPE_OPENAI_COMPATIBLE, PROVIDER_TYPE_GOOGLE_GEMINI}
 TEXT_PROVIDER_KINDS = {"mock", "openai"}
 IMAGE_PROVIDER_KINDS = {"mock", "openai_responses", "openai_images", "google_gemini_image"}
 REAL_IMAGE_PROVIDER_KINDS = IMAGE_PROVIDER_KINDS - {"mock"}
-PROVIDER_PURPOSES = {TEXT_PURPOSE, IMAGE_PURPOSE}
+AGENT_PROVIDER_KINDS = {"mock", "openai"}
+PROVIDER_PURPOSES = {TEXT_PURPOSE, IMAGE_PURPOSE, AGENT_PURPOSE}
 CAPABILITY_TEXT_RESPONSES = "text_responses"
 CAPABILITY_IMAGE_RESPONSES = "image_responses"
 CAPABILITY_IMAGE_IMAGES = "image_images"
@@ -271,7 +273,7 @@ def archive_provider_profile(session: Session, profile_id: str) -> ProviderProfi
         select(ProviderBinding).where(ProviderBinding.provider_profile_id == profile_id)
     ).all()
     if active_bindings:
-        raise ValueError("供应商仍被文案或图片配置使用，不能归档")
+        raise ValueError("供应商仍被文案、图片或设计师 Agent 配置使用，不能归档")
     profile.archived_at = datetime.now(UTC)
     profile.enabled = False
     session.commit()
@@ -374,6 +376,70 @@ def normalize_provider_binding_runtime_config(
 
 def normalize_provider_binding_model_settings(*, purpose: str, model_settings: dict[str, Any]) -> dict[str, Any]:
     return _normalize_binding_model_settings(purpose=purpose, model_settings=model_settings)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedAgentProviderConfig:
+    provider_kind: Literal["mock", "openai"]
+    model: str
+    provider_profile_id: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    fallback_provider_profile_id: str | None = None
+    fallback_api_key: str | None = None
+    fallback_base_url: str | None = None
+    fallback_model: str | None = None
+
+
+def resolve_agent_provider_config() -> ResolvedAgentProviderConfig:
+    """设计师 Agent 的供应商解析：主供应商 + 可选降级（fallback）供应商。"""
+    session = get_session_factory()()
+    try:
+        ensure_provider_config_bootstrapped(session)
+        binding = _require_binding(session, AGENT_PURPOSE)
+        kind = binding.provider_kind
+        if kind == "mock":
+            return ResolvedAgentProviderConfig(
+                provider_kind="mock",
+                model=_require_text_value(binding.model_settings_json, "model", "设计师 Agent 模型未配置"),
+            )
+        if kind != "openai":
+            raise RuntimeError(f"暂不支持的设计师 Agent provider: {kind}")
+        profile = _require_active_profile(binding)
+        _require_capability(profile, CAPABILITY_TEXT_RESPONSES)
+        model = _require_text_value(
+            binding.model_settings_json,
+            "model",
+            "设计师 Agent 模型未配置",
+            fallback_values=profile.default_models_json,
+        )
+        fallback_profile_id = _optional_str(binding.config_json.get("fallback_profile_id"))
+        fallback_api_key = fallback_base_url = fallback_model = None
+        if fallback_profile_id:
+            fallback_profile = session.get(ProviderProfile, fallback_profile_id)
+            if fallback_profile is None or fallback_profile.archived_at is not None or not fallback_profile.enabled:
+                raise RuntimeError("降级供应商档案不可用，请在系统设置中修正设计师 Agent 降级配置")
+            _require_capability(fallback_profile, CAPABILITY_TEXT_RESPONSES)
+            fallback_api_key = fallback_profile.api_key
+            fallback_base_url = fallback_profile.base_url
+            fallback_model = _optional_str(binding.model_settings_json.get("fallback_model")) or _optional_str(
+                fallback_profile.default_models_json.get("agent_model")
+            )
+            if not fallback_model:
+                raise RuntimeError("降级模型未配置，请在系统设置中填写 fallback_model")
+        return ResolvedAgentProviderConfig(
+            provider_kind="openai",
+            model=model,
+            provider_profile_id=profile.id,
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+            fallback_provider_profile_id=fallback_profile_id,
+            fallback_api_key=fallback_api_key,
+            fallback_base_url=fallback_base_url,
+            fallback_model=fallback_model,
+        )
+    finally:
+        session.close()
 
 
 def resolve_text_provider_config() -> ResolvedTextProviderConfig:
@@ -568,8 +634,13 @@ def _validate_binding_payload(
     config: dict[str, Any],
 ) -> None:
     if purpose not in PROVIDER_PURPOSES:
-        raise ValueError("用途必须是 text 或 image")
-    allowed_kinds = TEXT_PROVIDER_KINDS if purpose == TEXT_PURPOSE else IMAGE_PROVIDER_KINDS
+        raise ValueError("用途必须是 text、image 或 agent")
+    if purpose == AGENT_PURPOSE:
+        allowed_kinds = AGENT_PROVIDER_KINDS
+    elif purpose == TEXT_PURPOSE:
+        allowed_kinds = TEXT_PROVIDER_KINDS
+    else:
+        allowed_kinds = IMAGE_PROVIDER_KINDS
     if provider_kind not in allowed_kinds:
         raise ValueError("供应商接口类型不支持当前用途")
     _validate_binding_runtime_config(
@@ -590,6 +661,18 @@ def _validate_binding_payload(
     capability = _capability_for_kind(provider_kind)
     _require_capability(profile, capability)
     _validate_profile_type_supports_capability(profile.provider_type, capability)
+    if purpose == AGENT_PURPOSE:
+        fallback_profile_id = _optional_str(config.get("fallback_profile_id"))
+        if fallback_profile_id:
+            if fallback_profile_id == provider_profile_id:
+                raise ValueError("降级供应商不能与主供应商相同")
+            fallback_profile = session.get(ProviderProfile, fallback_profile_id)
+            if fallback_profile is None or fallback_profile.archived_at is not None:
+                raise ValueError("降级供应商档案不存在")
+            if not fallback_profile.enabled:
+                raise ValueError("降级供应商档案已停用")
+            _require_capability(fallback_profile, capability)
+            _validate_profile_type_supports_capability(fallback_profile.provider_type, capability)
 
 
 def _validate_profile_update_keeps_active_bindings(
@@ -647,6 +730,9 @@ def _validate_binding_runtime_config(
         _require_text_value(normalized_settings, "brief_model", "文案商品理解模型未配置", exc_type=ValueError)
         _require_text_value(normalized_settings, "copy_model", "文案生成模型未配置", exc_type=ValueError)
         return
+    if purpose == AGENT_PURPOSE:
+        _require_text_value(model_settings, "model", "设计师 Agent 模型未配置", exc_type=ValueError)
+        return
     _require_text_value(model_settings, "model", "图片模型未配置", exc_type=ValueError)
     if provider_kind == "openai_responses":
         _require_bool_value(
@@ -664,6 +750,13 @@ def _validate_binding_runtime_config(
 def _normalize_binding_model_settings(*, purpose: str, model_settings: dict[str, Any]) -> dict[str, Any]:
     if purpose == TEXT_PURPOSE:
         return _normalize_text_model_settings(model_settings)
+    if purpose == AGENT_PURPOSE:
+        normalized_agent: dict[str, Any] = {}
+        for key in ("model", "fallback_model"):
+            value = _optional_str(model_settings.get(key))
+            if value is not None:
+                normalized_agent[key] = value
+        return normalized_agent
     return {key: value for key, value in model_settings.items() if value is not None}
 
 
@@ -678,6 +771,11 @@ def _normalize_text_model_settings(model_settings: dict[str, Any]) -> dict[str, 
 
 
 def _normalize_binding_config(*, purpose: str, provider_kind: str, config: dict[str, Any]) -> dict[str, Any]:
+    if purpose == AGENT_PURPOSE:
+        if provider_kind == "mock":
+            return {}
+        fallback_profile_id = _optional_str(config.get("fallback_profile_id"))
+        return {"fallback_profile_id": fallback_profile_id} if fallback_profile_id else {}
     if purpose != IMAGE_PURPOSE:
         return {}
     if provider_kind == "openai_responses":

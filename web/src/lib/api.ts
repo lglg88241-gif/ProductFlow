@@ -143,7 +143,7 @@ export const api = {
   archiveProviderProfile(profileId: string): Promise<ProviderProfile> {
     return request(`/api/settings/provider-profiles/${profileId}`, { method: "DELETE" });
   },
-  updateProviderBinding(purpose: "text" | "image", payload: ProviderBindingUpdateRequest): Promise<ProviderBinding> {
+  updateProviderBinding(purpose: "text" | "image" | "agent", payload: ProviderBindingUpdateRequest): Promise<ProviderBinding> {
     return request(`/api/settings/provider-bindings/${purpose}`, {
       method: "PATCH",
       body: JSON.stringify(payload),

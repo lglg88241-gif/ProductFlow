@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from openai import OpenAI
 
-from productflow_backend.infrastructure.provider_config import resolve_text_provider_config
+from productflow_backend.infrastructure.provider_config import resolve_agent_provider_config
 
 
 class AgentLLMError(RuntimeError):
@@ -81,16 +81,49 @@ class OpenAICompatAgentClient:
         return AgentLLMResponse(content=choice.content, tool_calls=tool_calls, model=response.model or self.model)
 
 
+class FallbackAgentLLMClient:
+    """主供应商失败时自动降级到备用供应商（如 Grok → Gemini Flash）。"""
+
+    def __init__(self, primary: AgentLLMClient, fallback: AgentLLMClient) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.provider_name = f"{primary.provider_name}->{fallback.provider_name}"
+        self.model = primary.model
+
+    def chat(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        intent: str = "",
+    ) -> AgentLLMResponse:
+        try:
+            return self.primary.chat(messages=messages, tools=tools, intent=intent)
+        except AgentLLMError:
+            return self.fallback.chat(messages=messages, tools=tools, intent=intent)
+
+
 def build_agent_llm_client() -> AgentLLMClient:
-    """按 text 供应商绑定解析连接配置；mock 绑定不支持 Agent，明确报错。"""
-    config = resolve_text_provider_config()
+    """按 agent 供应商绑定解析连接配置：主供应商 + 可选降级；mock 绑定明确报错。"""
+    config = resolve_agent_provider_config()
     if config.provider_kind == "mock":
         raise AgentLLMError("设计师 Agent 需要 OpenAI 兼容文本供应商，请在系统设置中配置（当前为 mock）")
     if not config.api_key:
-        raise AgentLLMError("设计师 Agent 的文本供应商缺少 API Key，请在系统设置中补全")
-    return OpenAICompatAgentClient(
+        raise AgentLLMError("设计师 Agent 的供应商缺少 API Key，请在系统设置中补全")
+    primary = OpenAICompatAgentClient(
         provider_name=config.provider_kind,
         api_key=config.api_key,
         base_url=config.base_url,
-        model=config.copy_model,
+        model=config.model,
     )
+    if not config.fallback_provider_profile_id:
+        return primary
+    if not config.fallback_api_key or not config.fallback_model:
+        raise AgentLLMError("降级供应商配置不完整（缺 API Key 或 fallback_model），请在系统设置中补全")
+    fallback = OpenAICompatAgentClient(
+        provider_name=f"{config.provider_kind}:fallback",
+        api_key=config.fallback_api_key,
+        base_url=config.fallback_base_url,
+        model=config.fallback_model,
+    )
+    return FallbackAgentLLMClient(primary=primary, fallback=fallback)

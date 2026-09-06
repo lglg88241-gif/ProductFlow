@@ -25,6 +25,7 @@ from productflow_backend.config import (
 )
 from productflow_backend.infrastructure.db.models import AppSetting, ProviderBinding, ProviderProfile
 from productflow_backend.infrastructure.provider_config import (
+    AGENT_PROVIDER_KINDS,
     IMAGE_PROVIDER_KINDS,
     PROVIDER_PURPOSES,
     PROVIDER_TYPES,
@@ -360,7 +361,12 @@ def _normalize_import_bindings(
         seen_purposes.add(binding.purpose)
         if binding.purpose not in PROVIDER_PURPOSES:
             raise ValueError("用途必须是 text 或 image")
-        allowed_kinds = TEXT_PROVIDER_KINDS if binding.purpose == "text" else IMAGE_PROVIDER_KINDS
+        if binding.purpose == "text":
+            allowed_kinds = TEXT_PROVIDER_KINDS
+        elif binding.purpose == "agent":
+            allowed_kinds = AGENT_PROVIDER_KINDS
+        else:
+            allowed_kinds = IMAGE_PROVIDER_KINDS
         if binding.provider_kind not in allowed_kinds:
             raise ValueError("供应商接口类型不支持当前用途")
         normalized_config = normalize_provider_binding_runtime_config(

@@ -17,6 +17,7 @@ import {
   MessageSquareText,
   RotateCcw,
   Save,
+  Bot,
   Search,
   ServerCog,
   Settings as SettingsIcon,
@@ -55,6 +56,7 @@ export type SettingsSectionId =
   | "providers"
   | "text"
   | "image"
+  | "agent"
   | "prompts"
   | "upload"
   | "queue"
@@ -90,6 +92,7 @@ export interface ProviderProfileFormState {
 export interface ProviderProfileUsage {
   text: boolean;
   image: boolean;
+  agent: boolean;
 }
 
 export interface ProviderDrawerViewState {
@@ -164,6 +167,13 @@ const SETTINGS_SECTIONS: SettingsSection[] = [
     descriptionKey: "settings.section.imageDescription",
     groupKey: "settings.groupProviders",
     icon: Image,
+  },
+  {
+    id: "agent",
+    labelKey: "settings.section.agent",
+    descriptionKey: "settings.section.agentDescription",
+    groupKey: "settings.groupProviders",
+    icon: Bot,
   },
   {
     id: "prompts",
@@ -376,6 +386,7 @@ export function providerUsageFromBindings(bindings: ProviderBinding[], profileId
   return {
     text: bindings.some((binding) => binding.purpose === "text" && binding.provider_profile_id === profileId),
     image: bindings.some((binding) => binding.purpose === "image" && binding.provider_profile_id === profileId),
+    agent: bindings.some((binding) => binding.purpose === "agent" && binding.provider_profile_id === profileId),
   };
 }
 
@@ -387,11 +398,14 @@ export function providerUsageLabelKeys(usage: ProviderProfileUsage): Translation
   if (usage.image) {
     labels.push("settings.provider.usageImage");
   }
+  if (usage.agent) {
+    labels.push("settings.provider.usageAgent");
+  }
   return labels;
 }
 
 export function providerDisableBlocked(profile: ProviderProfile, usage: ProviderProfileUsage): boolean {
-  return profile.enabled && (usage.text || usage.image);
+  return profile.enabled && (usage.text || usage.image || usage.agent);
 }
 
 export function providerProfileCreatePayload(form: ProviderProfileFormState): ProviderProfileCreateRequest {
@@ -416,7 +430,7 @@ export function providerProfileUpdatePayload(form: ProviderProfileFormState): Pr
   };
 }
 
-function getBinding(data: ProviderConfigResponse | undefined, purpose: "text" | "image"): ProviderBinding | undefined {
+function getBinding(data: ProviderConfigResponse | undefined, purpose: "text" | "image" | "agent"): ProviderBinding | undefined {
   return data?.bindings.find((binding) => binding.purpose === purpose);
 }
 
@@ -438,6 +452,41 @@ export function textBindingPayloadFromDraft(draft: TextBindingDraft): ProviderBi
       ...(draft.copy_model.trim() ? { copy_model: draft.copy_model.trim() } : {}),
     },
     config: {},
+  };
+}
+
+interface AgentBindingDraft {
+  provider_kind: "mock" | "openai";
+  provider_profile_id: string;
+  model: string;
+  fallback_model: string;
+  fallback_profile_id: string;
+}
+
+function agentBindingDraft(binding: ProviderBinding | undefined): AgentBindingDraft {
+  return {
+    provider_kind: binding?.provider_kind === "openai" ? "openai" : "mock",
+    provider_profile_id: binding?.provider_profile_id ?? "",
+    model: textValue(binding?.model_settings, "model"),
+    fallback_model: textValue(binding?.model_settings, "fallback_model"),
+    fallback_profile_id: textValue(binding?.config, "fallback_profile_id"),
+  };
+}
+
+export function agentBindingPayloadFromDraft(draft: AgentBindingDraft): ProviderBindingUpdateRequest {
+  const modelSettings: ProviderBindingUpdateRequest["model_settings"] = {
+    ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
+  };
+  const config: ProviderBindingUpdateRequest["config"] = {};
+  if (draft.provider_kind === "openai") {
+    if (draft.fallback_model.trim()) modelSettings.fallback_model = draft.fallback_model.trim();
+    if (draft.fallback_profile_id.trim()) config.fallback_profile_id = draft.fallback_profile_id.trim();
+  }
+  return {
+    provider_kind: draft.provider_kind,
+    provider_profile_id: draft.provider_kind === "mock" ? null : draft.provider_profile_id,
+    model_settings: modelSettings,
+    config,
   };
 }
 
@@ -1538,6 +1587,95 @@ function TextBindingSection({ data, draft, pending, onChange, onSave }: TextBind
   );
 }
 
+interface AgentBindingSectionProps {
+  data: ProviderConfigResponse | undefined;
+  draft: AgentBindingDraft;
+  pending: boolean;
+  onChange: (next: AgentBindingDraft) => void;
+  onSave: () => void;
+}
+
+function AgentBindingSection({ data, draft, pending, onChange, onSave }: AgentBindingSectionProps) {
+  const { t } = useI18n();
+  const profiles = (data?.profiles ?? []).filter(
+    (profile) => profile.enabled && !profile.archived_at && profile.capabilities.includes("text_responses"),
+  );
+  const fallbackProfileId = draft.provider_kind === "openai" ? draft.fallback_profile_id : "";
+  return (
+    <div className={`${PANEL_CLASS} max-w-3xl space-y-5`}>
+      <SettingsFormField label={t("settings.provider.apiInterfaceLabel")}>
+        <SelectField
+          value={draft.provider_kind}
+          options={[
+            { value: "mock", label: t("settings.provider.interface.mock") },
+            { value: "openai", label: t("settings.provider.interface.openaiAgent") },
+          ]}
+          onChange={(value) => onChange({ ...draft, provider_kind: value === "openai" ? "openai" : "mock" })}
+          radius="lg"
+        />
+      </SettingsFormField>
+      {draft.provider_kind !== "mock" ? (
+        <SettingsFormField label={t("settings.provider.compatibleProviderLabel")}>
+          <SelectField
+            value={draft.provider_profile_id}
+            options={[
+              { value: "", label: t("settings.provider.selectProfile") },
+              ...profiles.map((profile) => ({ value: profile.id, label: profile.name })),
+            ]}
+            onChange={(value) => onChange({ ...draft, provider_profile_id: value })}
+            radius="lg"
+          />
+        </SettingsFormField>
+      ) : null}
+      <SettingsFormField label={t("settings.provider.agentModelLabel")}>
+        <input
+          value={draft.model}
+          onChange={(event) => onChange({ ...draft, model: event.target.value })}
+          className={INPUT_CLASS}
+          placeholder={t("settings.provider.agentModelPlaceholder")}
+        />
+      </SettingsFormField>
+      {draft.provider_kind === "openai" ? (
+        <>
+          <SettingsFormField label={t("settings.provider.agentFallbackProfileLabel")}>
+            <SelectField
+              value={fallbackProfileId}
+              options={[
+                { value: "", label: t("settings.provider.agentNoFallback") },
+                ...profiles
+                  .filter((profile) => profile.id !== draft.provider_profile_id)
+                  .map((profile) => ({ value: profile.id, label: profile.name })),
+              ]}
+              onChange={(value) => onChange({ ...draft, fallback_profile_id: value })}
+              radius="lg"
+            />
+          </SettingsFormField>
+          {fallbackProfileId ? (
+            <SettingsFormField label={t("settings.provider.agentFallbackModelLabel")}>
+              <input
+                value={draft.fallback_model}
+                onChange={(event) => onChange({ ...draft, fallback_model: event.target.value })}
+                className={INPUT_CLASS}
+                placeholder={t("settings.provider.agentFallbackModelPlaceholder")}
+              />
+            </SettingsFormField>
+          ) : null}
+        </>
+      ) : null}
+      <div className="flex justify-end border-t border-slate-100 pt-5 dark:border-slate-800">
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={pending || (draft.provider_kind !== "mock" && !draft.provider_profile_id)}
+          className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-slate-900"
+        >
+          {t("settings.provider.saveAgent")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 interface ImageBindingSectionProps {
   data: ProviderConfigResponse | undefined;
   draft: ImageBindingDraft;
@@ -1707,6 +1845,7 @@ export function SettingsPage() {
   const [togglingProviderProfileId, setTogglingProviderProfileId] = useState<string | null>(null);
   const [textDraft, setTextDraft] = useState<TextBindingDraft>(textBindingDraft(undefined));
   const [imageDraft, setImageDraft] = useState<ImageBindingDraft>(imageBindingDraft(undefined));
+  const [agentDraft, setAgentDraft] = useState<AgentBindingDraft>(agentBindingDraft(undefined));
   const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
   const [importPayload, setImportPayload] = useState<SettingsExportPayload | null>(null);
   const [importPreview, setImportPreview] = useState<SettingsImportPreviewResponse | null>(null);
@@ -1746,6 +1885,7 @@ export function SettingsPage() {
   useEffect(() => {
     setTextDraft(textBindingDraft(getBinding(providerConfigQuery.data, "text")));
     setImageDraft(imageBindingDraft(getBinding(providerConfigQuery.data, "image")));
+    setAgentDraft(agentBindingDraft(getBinding(providerConfigQuery.data, "agent")));
   }, [providerConfigQuery.data]);
 
   useEffect(() => {
@@ -2005,6 +2145,19 @@ export function SettingsPage() {
     onError: (mutationError) => {
       setSavedMessage("");
       setError(mutationError instanceof ApiError ? mutationError.detail : t("settings.provider.imageSaveFailed"));
+    },
+  });
+
+  const updateAgentBindingMutation = useMutation({
+    mutationFn: () => api.updateProviderBinding("agent", agentBindingPayloadFromDraft(agentDraft)),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider-config"] });
+      setError("");
+      setSavedMessage(t("settings.provider.agentSaved"));
+    },
+    onError: (mutationError) => {
+      setSavedMessage("");
+      setError(mutationError instanceof ApiError ? mutationError.detail : t("settings.provider.agentSaveFailed"));
     },
   });
 
@@ -2363,6 +2516,23 @@ export function SettingsPage() {
                           setError("");
                           setSavedMessage("");
                           updateImageBindingMutation.mutate();
+                        }}
+                      />
+                    ) : null}
+
+                    {activeSection === "agent" ? (
+                      <AgentBindingSection
+                        data={providerConfigQuery.data}
+                        draft={agentDraft}
+                        pending={providerPending}
+                        onChange={(next) => {
+                          setAgentDraft(next);
+                          setSavedMessage("");
+                        }}
+                        onSave={() => {
+                          setError("");
+                          setSavedMessage("");
+                          updateAgentBindingMutation.mutate();
                         }}
                       />
                     ) : null}

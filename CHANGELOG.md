@@ -6,6 +6,11 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Provider purpose classification**: new `agent` provider binding purpose, independent
+  from text (copy) and image (gpt-image-2) bindings. Agent bindings target
+  OpenAI-compatible chat providers (e.g. xAI grok-4.6) with an optional fallback
+  provider + model (e.g. gemini-3.8-flash) that takes over automatically when the
+  primary fails. Settings page gains an Agent section with fallback configuration.
 - **Designer Agent (M3)**: `recommend_designs` produces 2-3 recommendation cards
   (retrieved templates + per-candidate rationale, selectable in the workbench);
   `write_copy_report` delivers a full copy report (headline, Moments caption, selling

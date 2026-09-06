@@ -637,7 +637,7 @@ export interface SettingsLockState {
 }
 
 export type ProviderCapability = "text_responses" | "image_responses" | "image_images" | "image_google_gemini";
-export type ProviderPurpose = "text" | "image";
+export type ProviderPurpose = "text" | "image" | "agent";
 export type ProviderType = "openai_compatible" | "google_gemini";
 
 export interface ProviderProfile {

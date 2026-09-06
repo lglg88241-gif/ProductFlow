@@ -266,7 +266,7 @@ describe("SettingsPage provider profile helpers", () => {
       "profile-1",
     );
 
-    expect(usage).toEqual({ text: true, image: true });
+    expect(usage).toEqual({ text: true, image: true, agent: false });
     expect(providerUsageLabelKeys(usage)).toEqual([
       "settings.provider.usageText",
       "settings.provider.usageImage",
@@ -313,9 +313,9 @@ describe("SettingsPage provider profile helpers", () => {
   });
 
   it("blocks disabling an enabled provider that is currently used by a binding", () => {
-    expect(providerDisableBlocked(providerProfile({ enabled: true }), { text: true, image: false })).toBe(true);
-    expect(providerDisableBlocked(providerProfile({ enabled: true }), { text: false, image: false })).toBe(false);
-    expect(providerDisableBlocked(providerProfile({ enabled: false }), { text: true, image: true })).toBe(false);
+    expect(providerDisableBlocked(providerProfile({ enabled: true }), { text: true, image: false, agent: false })).toBe(true);
+    expect(providerDisableBlocked(providerProfile({ enabled: true }), { text: false, image: false, agent: false })).toBe(false);
+    expect(providerDisableBlocked(providerProfile({ enabled: false }), { text: true, image: true, agent: false })).toBe(false);
   });
 
   it("localizes the provider delete confirmation dialog copy", () => {
