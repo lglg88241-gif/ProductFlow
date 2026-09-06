@@ -163,6 +163,16 @@ def ensure_provider_config_bootstrapped(session: Session | None = None) -> None:
             config={},
         )
 
+    if _get_binding(session, AGENT_PURPOSE) is None:
+        _add_binding(
+            session,
+            purpose=AGENT_PURPOSE,
+            provider_kind="mock",
+            provider_profile=None,
+            model_settings={"model": "mock"},
+            config={},
+        )
+
     session.commit()
 
 

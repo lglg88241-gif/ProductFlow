@@ -528,6 +528,7 @@ def test_settings_import_rejects_unknown_version_and_rolls_back_invalid_bindings
         assert session.get(AppSetting, "generation_max_concurrent_tasks") is None
         bindings = {binding.purpose: binding for binding in session.scalars(select(ProviderBinding)).all()}
         assert {purpose: binding.provider_kind for purpose, binding in bindings.items()} == {
+            "agent": "mock",
             "image": "mock",
             "text": "mock",
         }
@@ -565,7 +566,7 @@ def test_provider_bootstrap_runs_on_app_startup(configured_env: Path) -> None:
 
     assert len(profiles) == 1
     assert set(profiles[0].capabilities_json) == {"text_responses", "image_responses"}
-    assert {binding.purpose for binding in bindings} == {"text", "image"}
+    assert {binding.purpose for binding in bindings} == {"text", "image", "agent"}
 
 
 def test_provider_bootstrap_merges_matching_legacy_text_and_image_config(configured_env: Path) -> None:
@@ -687,6 +688,7 @@ def test_provider_config_api_masks_keys_preserves_blank_update_and_validates_bin
     initial_payload = initial.json()
     assert initial_payload["profiles"] == []
     assert {binding["purpose"]: binding["provider_kind"] for binding in initial_payload["bindings"]} == {
+        "agent": "mock",
         "image": "mock",
         "text": "mock",
     }
@@ -826,7 +828,7 @@ def test_provider_config_api_masks_keys_preserves_blank_update_and_validates_bin
 
     archive_active = client.delete(f"/api/settings/provider-profiles/{profile_id}")
     assert archive_active.status_code == 400
-    assert "仍被文案或图片配置使用" in archive_active.json()["detail"]
+    assert "仍被文案、图片或设计师 Agent 配置使用" in archive_active.json()["detail"]
 
     reset_image = client.patch(
         "/api/settings/provider-bindings/image",

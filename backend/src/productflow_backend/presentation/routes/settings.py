@@ -27,9 +27,11 @@ from productflow_backend.infrastructure.db.models import AppSetting, ProviderBin
 from productflow_backend.infrastructure.provider_config import (
     AGENT_PROVIDER_KINDS,
     IMAGE_PROVIDER_KINDS,
+    IMAGE_PURPOSE,
     PROVIDER_PURPOSES,
     PROVIDER_TYPES,
     TEXT_PROVIDER_KINDS,
+    TEXT_PURPOSE,
     UNSET_PROVIDER_FIELD,
     archive_provider_profile,
     capability_for_provider_kind,
@@ -402,7 +404,8 @@ def _normalize_import_bindings(
                 "config_json": normalized_config,
             }
         )
-    missing_purposes = PROVIDER_PURPOSES - seen_purposes
+    # agent 绑定为可选（兼容旧版导出文件）；缺失时保留系统内现有 agent 配置
+    missing_purposes = {TEXT_PURPOSE, IMAGE_PURPOSE} - seen_purposes
     if missing_purposes:
         raise ValueError(f"配置文件缺少供应商绑定: {', '.join(sorted(missing_purposes))}")
     return bindings
@@ -454,7 +457,8 @@ def _apply_settings_import_bundle(session: Session, bundle: _SettingsImportBundl
             else:
                 existing.value = value
 
-        session.execute(delete(ProviderBinding))
+        imported_purposes = [binding["purpose"] for binding in bundle.provider_bindings]
+        session.execute(delete(ProviderBinding).where(ProviderBinding.purpose.in_(imported_purposes)))
         session.execute(delete(ProviderProfile))
         session.flush()
 
