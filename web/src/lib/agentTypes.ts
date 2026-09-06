@@ -45,8 +45,32 @@ export interface AgentToolEvent {
       size: string;
     }>;
     copies?: Array<{ title?: string; content?: string; hashtags?: string[] }>;
+    matches?: AgentAssetEntry[];
+    template_profile?: Record<string, unknown> | null;
+    tags?: string[];
+    title?: string;
     [key: string]: unknown;
   };
+}
+
+export interface AgentAssetEntry {
+  id: string;
+  kind: string;
+  title: string;
+  source: string;
+  mime_type: string;
+  width: number | null;
+  height: number | null;
+  tags: string[];
+  template_profile: Record<string, unknown> | null;
+  download_url: string;
+  preview_url: string;
+  thumbnail_url: string;
+  created_at: string;
+}
+
+export interface AgentAssetListResponse {
+  items: AgentAssetEntry[];
 }
 
 export interface AgentTurnResponse {

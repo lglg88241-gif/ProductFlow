@@ -6,6 +6,13 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Designer Agent (M2)**: asset library — new `asset_library` table (migration 0032) with
+  kinds (template/reference/output/brand), vision auto-annotation, and session traceability;
+  template image upload with structured visual analysis (layout/palette/copy slots/mood);
+  lightweight tag-based semantic search; three new agent tools (`search_assets`,
+  `analyze_template`, `save_asset`); the three built-in moments templates seed the library
+  idempotently at startup; workbench gains template upload, asset-library panel, and
+  match/profile cards.
 - **Designer Agent (M1)**: conversational design assistant — an LLM tool-calling loop that
   talks users through creating images without any prompt engineering. Guided dialogue
   stages (clarify → recommend → produce → review), `generate_image` / `edit_image` /

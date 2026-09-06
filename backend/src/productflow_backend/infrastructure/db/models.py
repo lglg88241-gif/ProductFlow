@@ -647,3 +647,32 @@ class AgentMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     agent_session: Mapped[AgentSession] = relationship(back_populates="messages")
+
+
+class AssetLibraryEntry(Base):
+    """设计师素材库：模板/参考图/成品/品牌物料，带视觉标注与会话溯源。"""
+
+    __tablename__ = "asset_library"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('template', 'reference', 'output', 'brand')",
+            name="ck_asset_library_kind",
+        ),
+        CheckConstraint("source IN ('upload', 'generated', 'builtin')", name="ck_asset_library_source"),
+        Index("ix_asset_library_kind_created", "kind", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), default="")
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    storage_path: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(100), default="image/png")
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    vision_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    template_profile_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    agent_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    image_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

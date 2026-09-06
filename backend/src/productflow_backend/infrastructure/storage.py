@@ -27,6 +27,19 @@ class LocalStorage:
         self.root = (root or settings.storage_root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def save_library_asset(
+        self,
+        kind: str,
+        filename: str,
+        content: bytes,
+    ) -> str:
+        """设计师素材库：按类型归档，文件名一律 uuid 防止路径注入。"""
+        suffix = Path(filename).suffix.lower() or ".bin"
+        relative = Path("library") / kind / f"{uuid4()}{suffix}"
+        self._write_relative(relative, content)
+        self._warm_image_variants(relative.as_posix())
+        return relative.as_posix()
+
     def save_product_upload(
         self,
         product_id: str,

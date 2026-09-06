@@ -5,9 +5,16 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from productflow_backend.application.asset_library import (
+    analyze_asset,
+    get_asset_entry,
+    register_generated_asset,
+    search_asset_entries,
+)
 from productflow_backend.application.designer_agent.llm import AgentLLMClient
 from productflow_backend.application.image_sessions import (
     create_image_session,
+    get_image_session_detail,
     submit_image_session_generation_task,
 )
 from productflow_backend.config import normalize_image_generation_size
@@ -76,6 +83,54 @@ def tool_schemas() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_assets",
+                "description": "在素材库里按关键词检索模板/参考图/成品（支持风格、色调、场景等标签）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "检索词，如 开业 粉色 战报 高级感"},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["template", "reference", "output", "brand"],
+                            "description": "可选，限定素材类型",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "analyze_template",
+                "description": "识别素材库中某张模板图的布局/配色/文案位，生成结构化模板档案。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {"type": "string", "description": "素材库中的素材 id"},
+                    },
+                    "required": ["asset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "save_asset",
+                "description": "把会话里生成的某张图存入素材库，方便以后复用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {"type": "string", "description": "图片会话中的资产 id"},
+                        "title": {"type": "string", "description": "可选，素材命名"},
+                    },
+                    "required": ["asset_id"],
+                },
+            },
+        },
     ]
 
 
@@ -125,6 +180,17 @@ def _generation_summary(detail: Any) -> dict[str, Any]:
     }
 
 
+def _asset_summary(entry) -> dict[str, Any]:
+    return {
+        "asset_id": entry.id,
+        "kind": entry.kind,
+        "title": entry.title,
+        "tags": entry.vision_tags_json,
+        "preview_url": f"/api/agent/assets/{entry.id}/download?variant=preview",
+        "template_profile": entry.template_profile_json,
+    }
+
+
 def execute_tool(
     db: Session,
     agent_session: AgentSession,
@@ -136,14 +202,70 @@ def execute_tool(
     """执行一个工具调用；异常转译为人话 JSON 交回 LLM，绝不向上抛原始错误。"""
     try:
         if name == "generate_image":
-            return _run_generation(db, agent_session, prompt=str(arguments.get("prompt", "")),
-                                   size=arguments.get("size"), base_asset_id=None)
+            return _run_generation(
+                db, agent_session,
+                prompt=str(arguments.get("prompt", "")),
+                size=arguments.get("size"),
+                base_asset_id=None,
+            )
         if name == "edit_image":
-            return _run_generation(db, agent_session, prompt=str(arguments.get("prompt", "")),
-                                   size=arguments.get("size"),
-                                   base_asset_id=str(arguments.get("asset_id", "")) or None)
+            return _run_generation(
+                db, agent_session,
+                prompt=str(arguments.get("prompt", "")),
+                size=arguments.get("size"),
+                base_asset_id=str(arguments.get("asset_id", "")) or None,
+            )
         if name == "write_copy":
             return _run_write_copy(llm, arguments)
+        if name == "search_assets":
+            entries = search_asset_entries(
+                db,
+                str(arguments.get("query", "")),
+                kind=arguments.get("kind"),
+            )
+            return {
+                "status": "completed",
+                "matches": [_asset_summary(entry) for entry in entries],
+                "message": (
+                    f"找到 {len(entries)} 个相关素材"
+                    if entries
+                    else "素材库里没有找到相关的，可以上传一张模板图给我看。"
+                ),
+            }
+        if name == "analyze_template":
+            entry = get_asset_entry(db, str(arguments.get("asset_id", "")))
+            analyzed = analyze_asset(db, entry, llm)
+            return {"status": "completed", **_asset_summary(analyzed)}
+        if name == "save_asset":
+            image_session_id = agent_session.image_session_id
+            if image_session_id is None:
+                return {"status": "error", "message": "当前会话还没有生成过图片，没有可保存的内容。"}
+            detail = get_image_session_detail(db, image_session_id)
+            requested_asset_id = str(arguments.get("asset_id", "")) or None
+            candidates = [
+                round_item.generated_asset for round_item in detail.rounds if round_item.generated_asset is not None
+            ]
+            asset = None
+            if requested_asset_id:
+                asset = next((item for item in candidates if item.id == requested_asset_id), None)
+                if asset is None:
+                    return {"status": "error", "message": "这张图不在当前会话里，请从会话产出的图片中选。"}
+            elif candidates:
+                asset = candidates[-1]
+            if asset is None:
+                return {"status": "error", "message": "当前会话还没有可保存的图片。"}
+            from productflow_backend.infrastructure.storage import LocalStorage
+
+            raw = LocalStorage().resolve(asset.storage_path).read_bytes()
+            entry = register_generated_asset(
+                db,
+                content=raw,
+                mime_type=asset.mime_type,
+                title=str(arguments.get("title") or f"会话产出 {asset.id[:8]}"),
+                agent_session_id=agent_session.id,
+                image_session_id=image_session_id,
+            )
+            return {"status": "completed", "message": "已存入素材库。", **_asset_summary(entry)}
         return {"status": "error", "message": f"未知工具: {name}"}
     except Exception as exc:  # noqa: BLE001 - 面向用户的工具错误必须转译
         return {"status": "error", "message": _friendly_generation_error(exc), "detail": str(exc)[:200]}

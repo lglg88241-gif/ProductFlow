@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -71,3 +72,48 @@ def _execute_image_session_queue_inline(monkeypatch: pytest.MonkeyPatch) -> None
         "productflow_backend.application.image_sessions.enqueue_image_session_generation_task",
         execute_image_session_generation_task,
     )
+
+
+class ScriptedAgentLLM:
+    """按剧本回放的假 Agent LLM。
+
+    - write_copy 的内部调用消费同一剧本；
+    - analyze_template 的视觉调用（content 为多模态列表）返回 vision_response，
+      不消耗剧本，便于独立编排。
+    """
+
+    provider_name = "scripted"
+    model = "scripted-model"
+
+    def __init__(self, script, vision_response: dict | None = None) -> None:
+        self.script = list(script)
+        self.vision_response = vision_response or {}
+        self.calls: list[dict] = []
+        self.image_calls = 0
+
+    def chat(self, *, messages, tools):
+        from productflow_backend.application.designer_agent.llm import AgentLLMResponse
+
+        self.calls.append({"messages": [dict(item) for item in messages], "tools": tools})
+        content = messages[-1].get("content") if messages else None
+        if isinstance(content, list):
+            self.image_calls += 1
+            return AgentLLMResponse(content=json.dumps(self.vision_response, ensure_ascii=False), model=self.model)
+        if not self.script:
+            return AgentLLMResponse(content="好的。", model=self.model)
+        return self.script.pop(0)
+
+
+@pytest.fixture()
+def install_scripted_llm(monkeypatch: pytest.MonkeyPatch):
+    """把剧本化假 LLM 注入 designer agent 循环。"""
+
+    def _install(script: list, vision_response: dict | None = None) -> ScriptedAgentLLM:
+        client = ScriptedAgentLLM(script, vision_response=vision_response)
+        monkeypatch.setattr(
+            "productflow_backend.application.designer_agent.loop.build_agent_llm_client",
+            lambda: client,
+        )
+        return client
+
+    return _install

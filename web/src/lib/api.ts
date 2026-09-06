@@ -1,4 +1,6 @@
 import type {
+  AgentAssetEntry,
+  AgentAssetListResponse,
   AgentSession,
   AgentSessionDetail,
   AgentSessionListResponse,
@@ -480,5 +482,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ content }),
     });
+  },
+  listAgentAssets(kind?: string): Promise<AgentAssetListResponse> {
+    const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+    return request(`/api/agent/assets${query}`);
+  },
+  async uploadAgentAsset(file: File, kind: string): Promise<AgentAssetEntry> {
+    const body = new FormData();
+    body.append("file", file);
+    body.append("kind", kind);
+    return request("/api/agent/assets", { method: "POST", body });
+  },
+  deleteAgentAsset(assetId: string): Promise<void> {
+    return request(`/api/agent/assets/${assetId}`, { method: "DELETE" });
   },
 };

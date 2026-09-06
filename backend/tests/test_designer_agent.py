@@ -1,45 +1,17 @@
-"""设计师 Agent 的编排循环与路由测试（spec §10 剧本的确定性回放）。"""
+"""设计师 Agent 的编排循环与路由测试（spec §10 剧本的确定性回放）。
+
+`install_scripted_llm` fixture 由 conftest 提供。
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 from helpers import _enable_deletion, _login
 
 from productflow_backend.application.designer_agent.llm import AgentLLMResponse, AgentToolCall
-
-
-class ScriptedAgentLLM:
-    """按剧本回放的假 LLM；write_copy 的内部调用也消费同一剧本。"""
-
-    provider_name = "scripted"
-    model = "scripted-model"
-
-    def __init__(self, script: list[AgentLLMResponse]) -> None:
-        self.script = list(script)
-        self.calls: list[dict] = []
-
-    def chat(self, *, messages: list[dict], tools: list[dict]) -> AgentLLMResponse:
-        self.calls.append({"messages": [dict(m) for m in messages], "tools": tools})
-        if not self.script:
-            return AgentLLMResponse(content="好的。", tool_calls=[], model=self.model)
-        return self.script.pop(0)
-
-
-@pytest.fixture()
-def install_scripted_llm(monkeypatch: pytest.MonkeyPatch):
-    def _install(script: list[AgentLLMResponse]) -> ScriptedAgentLLM:
-        client = ScriptedAgentLLM(script)
-        monkeypatch.setattr(
-            "productflow_backend.application.designer_agent.loop.build_agent_llm_client",
-            lambda: client,
-        )
-        return client
-
-    return _install
 
 
 def _copy_script() -> list[AgentLLMResponse]:

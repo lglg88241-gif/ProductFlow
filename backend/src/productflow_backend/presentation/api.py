@@ -6,8 +6,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from productflow_backend.application.asset_library import bootstrap_builtin_assets
 from productflow_backend.config import get_runtime_settings, get_settings
 from productflow_backend.infrastructure.logging import (
     cleanup_old_logs,
@@ -51,6 +53,10 @@ def create_app() -> FastAPI:
             ensure_provider_config_bootstrapped()
         recover_unfinished_workflow_runs()
         recover_unfinished_image_session_generation_tasks()
+        try:
+            bootstrap_builtin_assets()
+        except SQLAlchemyError:
+            logging.getLogger(__name__).warning("内置素材库样板导入失败，跳过（下次启动重试）", exc_info=True)
         if not get_runtime_settings().admin_access_required:
             logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
         if not get_settings().session_cookie_secure:
