@@ -145,6 +145,15 @@ class Settings(BaseSettings):
     log_backup_count: int = 5
     log_retention_days: int = 14
 
+    # 设计师 Agent 供应商（.env 直读；界面上配置的 agent 绑定优先于此）
+    agent_provider_kind: str = "mock"
+    agent_api_key: str | None = None
+    agent_base_url: str | None = None
+    agent_model: str = "grok-4.6"
+    agent_fallback_api_key: str | None = None
+    agent_fallback_base_url: str | None = None
+    agent_fallback_model: str = "gemini-3.8-flash"
+
     text_provider_kind: str = "mock"
     text_api_key: str | None = None
     text_base_url: str | None = None

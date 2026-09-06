@@ -194,3 +194,54 @@ def test_agent_purpose_survives_settings_export_import(configured_env: Path) -> 
     bindings = {item["purpose"]: item for item in imported.json()["provider_config"]["bindings"]}
     assert bindings["agent"]["provider_kind"] == "openai"
 
+
+
+def test_agent_config_falls_back_to_env_variables(configured_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """绑定保持 mock 时，.env 的 AGENT_* 直读生效（用户自提供 API 场景）。"""
+    monkeypatch.setenv("AGENT_PROVIDER_KIND", "openai")
+    monkeypatch.setenv("AGENT_API_KEY", "relay-key")
+    monkeypatch.setenv("AGENT_BASE_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("AGENT_MODEL", "grok-4.6")
+    monkeypatch.setenv("AGENT_FALLBACK_API_KEY", "relay-key")
+    monkeypatch.setenv("AGENT_FALLBACK_BASE_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("AGENT_FALLBACK_MODEL", "gemini-3.8-flash")
+    monkeypatch.setenv("AGENT_FALLBACK_MODEL", "gemini-3.8-flash")
+    from productflow_backend.config import get_settings, invalidate_runtime_settings_cache
+
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+
+    resolved = resolve_agent_provider_config()
+    assert resolved.provider_kind == "openai"
+    assert resolved.model == "grok-4.6"
+    assert resolved.api_key == "relay-key"
+    assert resolved.base_url == "https://relay.example.com/v1"
+    assert resolved.fallback_model == "gemini-3.8-flash"
+    assert resolved.fallback_api_key == "relay-key"
+
+
+def test_ui_binding_overrides_env_variables(
+    configured_env: Path,
+    unlocked_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """界面上配置的 agent 绑定优先于 .env（其余照常）。"""
+    monkeypatch.setenv("AGENT_PROVIDER_KIND", "openai")
+    monkeypatch.setenv("AGENT_API_KEY", "env-key")
+    monkeypatch.setenv("AGENT_BASE_URL", "https://env.example.com/v1")
+    from productflow_backend.config import get_settings, invalidate_runtime_settings_cache
+
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+
+    profile_id = _create_text_profile(unlocked_client, name="UI 档案", base_url="https://ui.example.com/v1")
+    updated = unlocked_client.patch(
+        "/api/settings/provider-bindings/agent",
+        json=_binding_payload(profile_id),
+    )
+    assert updated.status_code == 200
+
+    resolved = resolve_agent_provider_config()
+    assert resolved.api_key is None or resolved.base_url != "https://env.example.com/v1"
+    assert resolved.base_url == "https://ui.example.com/v1"
+    assert resolved.provider_profile_id == profile_id

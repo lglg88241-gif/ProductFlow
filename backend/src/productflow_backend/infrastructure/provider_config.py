@@ -401,18 +401,51 @@ class ResolvedAgentProviderConfig:
     fallback_model: str | None = None
 
 
+def _agent_config_from_env() -> ResolvedAgentProviderConfig:
+    """.env 直读的设计师 Agent 配置（AGENT_* 环境变量）。
+
+    绑定是 mock/未配置时启用；界面上配置的 agent 绑定优先于此。
+    """
+    from productflow_backend.config import get_settings
+
+    settings = get_settings()
+    if settings.agent_provider_kind != "openai":
+        return ResolvedAgentProviderConfig(provider_kind="mock", model=settings.agent_model)
+    if not settings.agent_api_key:
+        return ResolvedAgentProviderConfig(provider_kind="mock", model=settings.agent_model)
+    if not settings.agent_base_url:
+        return ResolvedAgentProviderConfig(provider_kind="mock", model=settings.agent_model)
+    return ResolvedAgentProviderConfig(
+        provider_kind="openai",
+        model=settings.agent_model,
+        api_key=settings.agent_api_key,
+        base_url=settings.agent_base_url,
+        fallback_api_key=settings.agent_fallback_api_key,
+        fallback_base_url=settings.agent_fallback_base_url,
+        fallback_model=settings.agent_fallback_model if settings.agent_fallback_api_key else None,
+    )
+
+
 def resolve_agent_provider_config() -> ResolvedAgentProviderConfig:
-    """设计师 Agent 的供应商解析：主供应商 + 可选降级（fallback）供应商。"""
+    """设计师 Agent 的供应商解析：主供应商 + 可选降级（fallback）供应商。
+
+    优先级：界面上配置的 agent 绑定（openai）> .env 的 AGENT_* 环境变量 > mock。
+    """
     session = get_session_factory()()
     try:
         ensure_provider_config_bootstrapped(session)
-        binding = _require_binding(session, AGENT_PURPOSE)
-        kind = binding.provider_kind
-        if kind == "mock":
+        binding = _get_binding(session, AGENT_PURPOSE)
+        if binding is None or binding.provider_kind == "mock":
+            env_config = _agent_config_from_env()
+            if env_config.provider_kind == "openai":
+                return env_config
+            if binding is None:
+                raise RuntimeError("设计师 Agent 供应商未配置：请在 .env 填写 AGENT_* 或在系统设置中绑定")
             return ResolvedAgentProviderConfig(
                 provider_kind="mock",
                 model=_require_text_value(binding.model_settings_json, "model", "设计师 Agent 模型未配置"),
             )
+        kind = binding.provider_kind
         if kind != "openai":
             raise RuntimeError(f"暂不支持的设计师 Agent provider: {kind}")
         profile = _require_active_profile(binding)

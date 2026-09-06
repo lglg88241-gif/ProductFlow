@@ -49,6 +49,14 @@ services:
       ADMIN_ACCESS_KEY: ${ADMIN_ACCESS_KEY:?set ADMIN_ACCESS_KEY in .env}
       SETTINGS_ACCESS_TOKEN: ${SETTINGS_ACCESS_TOKEN:?set SETTINGS_ACCESS_TOKEN in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      # 设计师 Agent 供应商（.env 直读；界面配置的 agent 绑定优先）
+      AGENT_PROVIDER_KIND: ${AGENT_PROVIDER_KIND:-mock}
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
+      AGENT_BASE_URL: ${AGENT_BASE_URL:-}
+      AGENT_MODEL: ${AGENT_MODEL:-grok-4.6}
+      AGENT_FALLBACK_API_KEY: ${AGENT_FALLBACK_API_KEY:-}
+      AGENT_FALLBACK_BASE_URL: ${AGENT_FALLBACK_BASE_URL:-}
+      AGENT_FALLBACK_MODEL: ${AGENT_FALLBACK_MODEL:-gemini-3.8-flash}
       DATABASE_URL: postgresql+psycopg://productflow:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@productflow-postgres:5432/productflow
       REDIS_URL: redis://productflow-redis:6379/0
       STORAGE_ROOT: /app/storage

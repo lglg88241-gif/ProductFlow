@@ -107,7 +107,9 @@ def build_agent_llm_client() -> AgentLLMClient:
     """按 agent 供应商绑定解析连接配置：主供应商 + 可选降级；mock 绑定明确报错。"""
     config = resolve_agent_provider_config()
     if config.provider_kind == "mock":
-        raise AgentLLMError("设计师 Agent 需要 OpenAI 兼容文本供应商，请在系统设置中配置（当前为 mock）")
+        raise AgentLLMError(
+            "设计师 Agent 供应商未配置：可在 .env 填写 AGENT_*（地址/key/模型），或在系统设置中绑定（当前为 mock）"
+        )
     if not config.api_key:
         raise AgentLLMError("设计师 Agent 的供应商缺少 API Key，请在系统设置中补全")
     primary = OpenAICompatAgentClient(

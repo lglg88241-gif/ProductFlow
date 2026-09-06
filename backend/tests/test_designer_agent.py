@@ -190,4 +190,4 @@ def test_agent_reports_missing_real_text_provider(configured_env: Path) -> None:
 
     available, message = is_agent_llm_available()
     assert available is False
-    assert "OpenAI 兼容" in message
+    assert "AGENT_*" in message
