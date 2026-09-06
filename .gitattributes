@@ -1,0 +1,21 @@
+# Normalize line endings: the repo stores LF; checkouts use LF on every OS.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF so PowerShell parsing stays predictable.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+# Binaries
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.ttc binary
+*.pma binary
+*.dat binary
