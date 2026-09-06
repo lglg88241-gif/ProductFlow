@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -7,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from productflow_backend.config import get_settings
+from productflow_backend.config import get_runtime_settings, get_settings
 from productflow_backend.infrastructure.logging import (
     cleanup_old_logs,
     configure_logging,
@@ -49,6 +50,8 @@ def create_app() -> FastAPI:
             ensure_provider_config_bootstrapped()
         recover_unfinished_workflow_runs()
         recover_unfinished_image_session_generation_tasks()
+        if not get_runtime_settings().admin_access_required:
+            logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
         yield
 
     app = FastAPI(title="ProductFlow API", version="0.1.0", lifespan=lifespan)
@@ -69,8 +72,8 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
 
     @app.get("/healthz")
-    def healthcheck() -> dict[str, str]:
-        return {"status": "ok"}
+    def healthcheck() -> dict[str, object]:
+        return {"status": "ok", "admin_access_required": get_runtime_settings().admin_access_required}
 
     app.include_router(auth_router)
     app.include_router(copy_inputs_router)

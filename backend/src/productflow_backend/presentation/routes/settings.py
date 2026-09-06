@@ -96,6 +96,26 @@ def _raise_bad_request(exc: Exception) -> NoReturn:
     raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+API_KEY_REDACTED_PREFIX = "__redacted__"
+
+
+def _mask_api_key(api_key: str) -> str:
+    """导出文件中的 API key 一律脱敏，仅保留尾 4 位供人工核对。"""
+    return f"{API_KEY_REDACTED_PREFIX}{api_key[-4:]}"
+
+
+def _is_masked_api_key(api_key: str | None) -> bool:
+    return api_key is not None and api_key.startswith(API_KEY_REDACTED_PREFIX)
+
+
+def _reject_production_auth_disable(normalized_values: dict[str, str]) -> None:
+    """生产环境禁止通过运行时配置关闭登录访问密钥（防误配置导致 API 裸奔）。"""
+    if get_settings().app_env.strip().lower() != "production":
+        return
+    if normalized_values.get("admin_access_required") == "false":
+        raise ValueError("生产环境不允许通过运行时配置关闭登录访问密钥")
+
+
 def _load_database_values(session: Session) -> dict[str, AppSetting]:
     rows = session.scalars(select(AppSetting).where(AppSetting.key.in_(RUNTIME_CONFIG_KEYS))).all()
     return {row.key: row for row in rows}
@@ -232,7 +252,7 @@ def _build_settings_export_document(session: Session) -> SettingsExportDocument:
                 name=profile.name,
                 provider_type=profile.provider_type,
                 base_url=profile.base_url,
-                api_key=profile.api_key,
+                api_key=_mask_api_key(profile.api_key) if profile.api_key else None,
                 capabilities=list(profile.capabilities_json or []),
                 default_models=dict(profile.default_models_json or {}),
                 config=dict(profile.config_json or {}),
@@ -273,6 +293,7 @@ def _normalize_runtime_import_config(document: SettingsExportDocument) -> dict[s
     if missing_keys:
         raise ValueError(f"配置文件缺少配置项: {', '.join(sorted(missing_keys))}")
     normalized_values = normalize_config_values(document.runtime_config)
+    _reject_production_auth_disable(normalized_values)
     _validate_runtime_settings(normalized_values)
     return normalized_values
 
@@ -398,8 +419,12 @@ def _build_settings_import_bundle(payload: Any) -> _SettingsImportBundle:
         provider_binding_count=len(bindings),
         provider_profile_names=[profile["name"] for profile in profiles],
         provider_binding_purposes=sorted(binding["purpose"] for binding in bindings),
-        includes_api_keys=any(bool(profile["api_key"]) for profile in profiles),
-        provider_profiles_with_api_key_count=sum(1 for profile in profiles if profile["api_key"]),
+        includes_api_keys=any(
+            bool(profile["api_key"]) and not _is_masked_api_key(profile["api_key"]) for profile in profiles
+        ),
+        provider_profiles_with_api_key_count=sum(
+            1 for profile in profiles if bool(profile["api_key"]) and not _is_masked_api_key(profile["api_key"])
+        ),
     )
     return _SettingsImportBundle(
         normalized_runtime_config=normalized_runtime_config,
@@ -411,6 +436,11 @@ def _build_settings_import_bundle(payload: Any) -> _SettingsImportBundle:
 
 def _apply_settings_import_bundle(session: Session, bundle: _SettingsImportBundle) -> None:
     with session.begin():
+        # 导出文件中的 API key 已脱敏；同 id 档案重新导入时沿用库内现存的明文 key。
+        existing_keys: dict[str, str | None] = {
+            profile_id: api_key
+            for profile_id, api_key in session.execute(select(ProviderProfile.id, ProviderProfile.api_key)).all()
+        }
         for key, value in bundle.normalized_runtime_config.items():
             existing = session.get(AppSetting, key)
             if existing is None:
@@ -429,7 +459,11 @@ def _apply_settings_import_bundle(session: Session, bundle: _SettingsImportBundl
                     name=profile["name"],
                     provider_type=profile["provider_type"],
                     base_url=profile["base_url"],
-                    api_key=profile["api_key"],
+                    api_key=(
+                    existing_keys.get(profile["id"])
+                    if _is_masked_api_key(profile["api_key"])
+                    else profile["api_key"]
+                ),
                     capabilities_json=profile["capabilities_json"],
                     default_models_json=profile["default_models_json"],
                     config_json=profile["config_json"],
@@ -660,6 +694,7 @@ def update_config_endpoint(
 
     try:
         normalized_values = normalize_config_values(payload.values)
+        _reject_production_auth_disable(normalized_values)
         current_values = _load_database_values(session)
         next_values = {key: row.value for key, row in current_values.items() if key not in reset_keys}
         next_values.update(normalized_values)

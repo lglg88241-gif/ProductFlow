@@ -318,7 +318,7 @@ def test_settings_api_persists_database_overrides(configured_env: Path) -> None:
     assert "未知配置项: image_provider_kind" in legacy_provider_update.json()["detail"]
 
 
-def test_settings_export_includes_migratable_runtime_config_provider_secrets_and_excludes_env_only(
+def test_settings_export_masks_provider_api_keys_and_excludes_env_only(
     configured_env: Path,
 ) -> None:
     from productflow_backend.presentation.api import create_app
@@ -387,7 +387,7 @@ def test_settings_export_includes_migratable_runtime_config_provider_secrets_and
     assert "redis://localhost:6379/9" not in str(payload)
 
     exported_profile = next(profile for profile in payload["provider_profiles"] if profile["id"] == profile_id)
-    assert exported_profile["api_key"] == "export-secret-key"
+    assert exported_profile["api_key"] == "__redacted__-key"
     assert exported_profile["base_url"] == "https://export.example/v1"
     assert exported_profile["capabilities"] == ["text_responses", "image_images"]
     exported_bindings = {binding["purpose"]: binding for binding in payload["provider_bindings"]}
@@ -987,7 +987,7 @@ def test_provider_config_supports_google_gemini_profiles_bindings_and_import(con
     document = exported.json()
     exported_profile = next(item for item in document["provider_profiles"] if item["id"] == profile_id)
     assert exported_profile["provider_type"] == "google_gemini"
-    assert exported_profile["api_key"] == "google-secret-key"
+    assert exported_profile["api_key"] == "__redacted__-key"
     exported_image = next(item for item in document["provider_bindings"] if item["purpose"] == "image")
     assert exported_image["provider_kind"] == "google_gemini_image"
 
@@ -1404,3 +1404,123 @@ def test_legacy_image_chat_route_is_removed(configured_env: Path) -> None:
         json={"prompt": "做一张白底商品图", "size": "1024x1024"},
     )
     assert response.status_code == 404
+
+
+def _create_profile_with_key(client: TestClient, *, name: str, api_key: str) -> str:
+    created = client.post(
+        "/api/settings/provider-profiles",
+        json={
+            "name": name,
+            "provider_type": "openai_compatible",
+            "base_url": "https://reimport.example/v1",
+            "api_key": api_key,
+            "capabilities": ["text_responses"],
+            "default_models": {},
+            "config": {},
+            "enabled": True,
+        },
+    )
+    assert created.status_code == 200, created.text
+    return created.json()["id"]
+
+
+def test_settings_export_masks_api_keys_and_reimport_preserves_existing_key(configured_env: Path) -> None:
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+    _unlock_settings(client)
+
+    profile_id = _create_profile_with_key(client, name="重导入网关", api_key="live-secret-key-9999")
+
+    exported = client.get("/api/settings/export")
+    assert exported.status_code == 200
+    document = exported.json()
+    exported_profile = next(profile for profile in document["provider_profiles"] if profile["id"] == profile_id)
+    assert exported_profile["api_key"] == "__redacted__9999"
+
+    preview = client.post("/api/settings/import/preview", json=document)
+    assert preview.status_code == 200
+    assert preview.json()["includes_api_keys"] is False
+
+    imported = client.post("/api/settings/import", json=document)
+    assert imported.status_code == 200
+    session = get_session_factory()()
+    try:
+        profile = session.get(ProviderProfile, profile_id)
+        assert profile is not None
+        assert profile.api_key == "live-secret-key-9999"
+    finally:
+        session.close()
+
+
+def test_settings_import_of_masked_key_without_existing_profile_stores_none(configured_env: Path) -> None:
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+    _unlock_settings(client)
+
+    profile_id = _create_profile_with_key(client, name="陌生档案", api_key="another-live-key-7777")
+    exported = client.get("/api/settings/export")
+    assert exported.status_code == 200
+    document = exported.json()
+
+    session = get_session_factory()()
+    try:
+        session.query(ProviderProfile).filter(ProviderProfile.id == profile_id).delete()
+        session.commit()
+    finally:
+        session.close()
+
+    imported = client.post("/api/settings/import", json=document)
+    assert imported.status_code == 200
+    session = get_session_factory()()
+    try:
+        profile = session.get(ProviderProfile, profile_id)
+        assert profile is not None
+        assert profile.api_key is None
+        assert profile.name == "陌生档案"
+    finally:
+        session.close()
+
+
+def test_production_rejects_disabling_admin_access_via_runtime_config(
+    configured_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from productflow_backend.config import invalidate_runtime_settings_cache
+    from productflow_backend.presentation.api import create_app
+
+    monkeypatch.setenv("APP_ENV", "production")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+    _unlock_settings(client)
+
+    rejected = client.patch("/api/settings", json={"values": {"admin_access_required": False}})
+    assert rejected.status_code == 400
+    assert "生产环境" in rejected.json()["detail"]
+
+    allowed = client.patch("/api/settings", json={"values": {"generation_max_concurrent_tasks": 4}})
+    assert allowed.status_code == 200
+
+
+def test_healthz_reports_runtime_auth_flag(configured_env: Path) -> None:
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+    _unlock_settings(client)
+
+    assert client.get("/healthz").json()["admin_access_required"] is True
+
+    patched = client.patch("/api/settings", json={"values": {"admin_access_required": False}})
+    assert patched.status_code == 200
+    assert client.get("/healthz").json()["admin_access_required"] is False
