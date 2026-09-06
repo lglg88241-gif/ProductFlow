@@ -143,7 +143,8 @@ def test_agent_binding_validation_errors(unlocked_client: TestClient) -> None:
     assert missing_model.status_code == 400
     assert "模型未配置" in missing_model.json()["detail"]
 
-    same_fallback = unlocked_client.patch(
+    # 中转 API 场景：主备同一档案（同站换模型）合法
+    relay_fallback = unlocked_client.patch(
         "/api/settings/provider-bindings/agent",
         json={
             "provider_kind": "openai",
@@ -152,8 +153,8 @@ def test_agent_binding_validation_errors(unlocked_client: TestClient) -> None:
             "config": {"fallback_profile_id": xai_profile},
         },
     )
-    assert same_fallback.status_code == 400
-    assert "降级供应商不能与主供应商相同" in same_fallback.json()["detail"]
+    assert relay_fallback.status_code == 200, relay_fallback.text
+    assert relay_fallback.json()["config"]["fallback_profile_id"] == xai_profile
 
     unknown_fallback = unlocked_client.patch(
         "/api/settings/provider-bindings/agent",

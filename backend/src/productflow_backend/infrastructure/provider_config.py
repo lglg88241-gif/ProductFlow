@@ -674,8 +674,7 @@ def _validate_binding_payload(
     if purpose == AGENT_PURPOSE:
         fallback_profile_id = _optional_str(config.get("fallback_profile_id"))
         if fallback_profile_id:
-            if fallback_profile_id == provider_profile_id:
-                raise ValueError("降级供应商不能与主供应商相同")
+            # 中转 API 场景下允许与主供应商相同（同站换模型即为主备降级）
             fallback_profile = session.get(ProviderProfile, fallback_profile_id)
             if fallback_profile is None or fallback_profile.archived_at is not None:
                 raise ValueError("降级供应商档案不存在")

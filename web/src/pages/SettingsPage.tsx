@@ -1642,9 +1642,7 @@ function AgentBindingSection({ data, draft, pending, onChange, onSave }: AgentBi
               value={fallbackProfileId}
               options={[
                 { value: "", label: t("settings.provider.agentNoFallback") },
-                ...profiles
-                  .filter((profile) => profile.id !== draft.provider_profile_id)
-                  .map((profile) => ({ value: profile.id, label: profile.name })),
+                ...profiles.map((profile) => ({ value: profile.id, label: profile.name })),
               ]}
               onChange={(value) => onChange({ ...draft, fallback_profile_id: value })}
               radius="lg"
