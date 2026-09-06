@@ -34,7 +34,6 @@ from productflow_backend.infrastructure.provider_config import (
     TEXT_PURPOSE,
     UNSET_PROVIDER_FIELD,
     archive_provider_profile,
-    capability_for_provider_kind,
     create_provider_profile,
     ensure_provider_config_bootstrapped,
     is_real_image_provider_kind,
@@ -392,9 +391,6 @@ def _normalize_import_bindings(
                 raise ValueError("供应商不存在")
             if not profile["enabled"]:
                 raise ValueError("供应商已停用")
-            capability = capability_for_provider_kind(binding.provider_kind)
-            if capability not in set(profile["capabilities_json"]):
-                raise ValueError("供应商档案不支持当前接口能力")
         bindings.append(
             {
                 "purpose": binding.purpose,

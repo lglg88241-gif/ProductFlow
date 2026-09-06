@@ -1526,7 +1526,7 @@ interface TextBindingSectionProps {
 function TextBindingSection({ data, draft, pending, onChange, onSave }: TextBindingSectionProps) {
   const { t } = useI18n();
   const profiles = (data?.profiles ?? []).filter(
-    (profile) => profile.enabled && !profile.archived_at && profile.capabilities.includes("text_responses"),
+    (profile) => profile.enabled && !profile.archived_at,
   );
   return (
     <div className={`${PANEL_CLASS} max-w-3xl space-y-5`}>
@@ -1598,7 +1598,7 @@ interface AgentBindingSectionProps {
 function AgentBindingSection({ data, draft, pending, onChange, onSave }: AgentBindingSectionProps) {
   const { t } = useI18n();
   const profiles = (data?.profiles ?? []).filter(
-    (profile) => profile.enabled && !profile.archived_at && profile.capabilities.includes("text_responses"),
+    (profile) => profile.enabled && !profile.archived_at,
   );
   const fallbackProfileId = draft.provider_kind === "openai" ? draft.fallback_profile_id : "";
   return (
@@ -1691,7 +1691,7 @@ function ImageBindingSection({ data, draft, pending, onChange, onSave }: ImageBi
         ? "image_google_gemini"
         : "image_images";
   const profiles = (data?.profiles ?? []).filter(
-    (profile) => profile.enabled && !profile.archived_at && profile.capabilities.includes(requiredCapability),
+    (profile) => profile.enabled && !profile.archived_at,
   );
   return (
     <div className={`${PANEL_CLASS} max-w-3xl space-y-5`}>

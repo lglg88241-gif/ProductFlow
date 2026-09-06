@@ -767,7 +767,8 @@ def test_provider_config_api_masks_keys_preserves_blank_update_and_validates_bin
     assert image_binding.json()["provider_kind"] == "openai_images"
     assert image_binding.json()["config"] == {"images_quality": "high", "images_style": "natural"}
 
-    invalid_binding = client.patch(
+    # 能力标注仅为展示提示：能力未勾选的档案同样允许绑定（中转 API 场景）
+    mismatched_capability_binding = client.patch(
         "/api/settings/provider-bindings/image",
         json={
             "provider_kind": "openai_responses",
@@ -776,8 +777,7 @@ def test_provider_config_api_masks_keys_preserves_blank_update_and_validates_bin
             "config": {"responses_background_enabled": True},
         },
     )
-    assert invalid_binding.status_code == 400
-    assert "不支持当前接口能力" in invalid_binding.json()["detail"]
+    assert mismatched_capability_binding.status_code == 200, mismatched_capability_binding.text
 
     missing_text_model = client.patch(
         "/api/settings/provider-bindings/text",
@@ -816,8 +816,7 @@ def test_provider_config_api_masks_keys_preserves_blank_update_and_validates_bin
             "capabilities": ["text_responses"],
         },
     )
-    assert remove_active_capability.status_code == 400
-    assert "不能移除当前接口能力" in remove_active_capability.json()["detail"]
+    assert remove_active_capability.status_code == 200, remove_active_capability.text
 
     disable_active_profile = client.patch(
         f"/api/settings/provider-profiles/{profile_id}",

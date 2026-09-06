@@ -364,7 +364,7 @@ def validate_provider_profile_contract(
     base_url: str | None,
 ) -> None:
     normalized_provider_type = _normalize_provider_type(provider_type)
-    _validate_capabilities_for_provider_type(capabilities, provider_type=normalized_provider_type)
+    _validate_capabilities(capabilities)
     _validate_provider_profile_connection(provider_type=normalized_provider_type, base_url=base_url)
 
 
@@ -416,7 +416,6 @@ def resolve_agent_provider_config() -> ResolvedAgentProviderConfig:
         if kind != "openai":
             raise RuntimeError(f"暂不支持的设计师 Agent provider: {kind}")
         profile = _require_active_profile(binding)
-        _require_capability(profile, CAPABILITY_TEXT_RESPONSES)
         model = _require_text_value(
             binding.model_settings_json,
             "model",
@@ -429,7 +428,6 @@ def resolve_agent_provider_config() -> ResolvedAgentProviderConfig:
             fallback_profile = session.get(ProviderProfile, fallback_profile_id)
             if fallback_profile is None or fallback_profile.archived_at is not None or not fallback_profile.enabled:
                 raise RuntimeError("降级供应商档案不可用，请在系统设置中修正设计师 Agent 降级配置")
-            _require_capability(fallback_profile, CAPABILITY_TEXT_RESPONSES)
             fallback_api_key = fallback_profile.api_key
             fallback_base_url = fallback_profile.base_url
             fallback_model = _optional_str(binding.model_settings_json.get("fallback_model")) or _optional_str(
@@ -467,7 +465,6 @@ def resolve_text_provider_config() -> ResolvedTextProviderConfig:
         if kind != "openai":
             raise RuntimeError(f"暂不支持的文案 provider: {kind}")
         profile = _require_active_profile(binding)
-        _require_capability(profile, CAPABILITY_TEXT_RESPONSES)
         brief_model = _require_text_value(
             binding.model_settings_json,
             "brief_model",
@@ -506,8 +503,6 @@ def resolve_image_provider_config() -> ResolvedImageProviderConfig:
         if kind not in {"openai_responses", "openai_images", "google_gemini_image"}:
             raise RuntimeError(f"暂不支持的图片 provider: {kind}")
         profile = _require_active_profile(binding)
-        capability = _capability_for_kind(kind)
-        _require_capability(profile, capability)
         return ResolvedImageProviderConfig(
             provider_kind=kind,  # type: ignore[arg-type]
             model=_require_text_value(
@@ -668,9 +663,6 @@ def _validate_binding_payload(
         raise ValueError("供应商不存在")
     if not profile.enabled:
         raise ValueError("供应商已停用")
-    capability = _capability_for_kind(provider_kind)
-    _require_capability(profile, capability)
-    _validate_profile_type_supports_capability(profile.provider_type, capability)
     if purpose == AGENT_PURPOSE:
         fallback_profile_id = _optional_str(config.get("fallback_profile_id"))
         if fallback_profile_id:
@@ -680,8 +672,6 @@ def _validate_binding_payload(
                 raise ValueError("降级供应商档案不存在")
             if not fallback_profile.enabled:
                 raise ValueError("降级供应商档案已停用")
-            _require_capability(fallback_profile, capability)
-            _validate_profile_type_supports_capability(fallback_profile.provider_type, capability)
 
 
 def _validate_profile_update_keeps_active_bindings(
@@ -698,16 +688,6 @@ def _validate_profile_update_keeps_active_bindings(
         return
     if enabled is False:
         raise ValueError("供应商仍被文案或图片配置使用，不能停用")
-    if capabilities is None:
-        return
-
-    capability_set = set(capabilities)
-    for binding in active_bindings:
-        if binding.provider_kind == "mock":
-            continue
-        required_capability = _capability_for_kind(binding.provider_kind)
-        if required_capability not in capability_set:
-            raise ValueError("供应商仍被文案或图片配置使用，不能移除当前接口能力")
 
 
 def _capability_for_kind(provider_kind: str) -> str:
@@ -850,8 +830,7 @@ def _require_bool_value(
 
 
 def _validate_capabilities(capabilities: list[str]) -> None:
-    if not capabilities:
-        raise ValueError("供应商能力不能为空")
+    # 能力标注仅作展示提示（中转 API 可路由任意模型），不做硬性限制
     unknown = set(capabilities) - PROVIDER_CAPABILITIES
     if unknown:
         raise ValueError(f"供应商能力不支持: {', '.join(sorted(unknown))}")
