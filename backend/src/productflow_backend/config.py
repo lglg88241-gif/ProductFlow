@@ -1,0 +1,763 @@
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import Field, ValidationError, ValidationInfo, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
+
+ConfigInputType = Literal["text", "password", "number", "boolean", "select", "multi_select", "textarea"]
+IMAGE_SIZE_PATTERN = re.compile(r"^\d+x\d+$")
+DEFAULT_IMAGE_GENERATION_MAX_DIMENSION = 3840
+IMAGE_GENERATION_MIN_DIMENSION = 512
+IMAGE_GENERATION_DIMENSION_MULTIPLE = 16
+IMAGE_GENERATION_MIN_MAX_DIMENSION = 512
+IMAGE_GENERATION_MAX_MAX_DIMENSION = 8192
+IMAGE_GENERATION_MAX_DIMENSION = DEFAULT_IMAGE_GENERATION_MAX_DIMENSION
+IMAGE_GENERATION_MAX_PIXELS = DEFAULT_IMAGE_GENERATION_MAX_DIMENSION * DEFAULT_IMAGE_GENERATION_MAX_DIMENSION
+DEFAULT_IMAGE_SESSION_IDLE_TIMEOUT_MINUTES = 90
+IMAGE_SESSION_IDLE_TIMEOUT_MIN_MINUTES = 1
+IMAGE_SESSION_IDLE_TIMEOUT_MAX_MINUTES = 24 * 60
+DEFAULT_IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MINUTES = 24 * 60
+DEFAULT_WORKFLOW_IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS = 15 * 60
+IMAGE_SIZE_CONFIG_KEYS = {"image_main_image_size", "image_promo_poster_size"}
+PROMPT_CONFIG_KEYS = {
+    "prompt_brief_system",
+    "prompt_copy_system",
+    "prompt_poster_image_template",
+    "prompt_poster_image_edit_template",
+    "prompt_poster_image_reference_policy",
+    "prompt_image_chat_template",
+}
+IMAGE_TOOL_FIELD_KEYS: tuple[str, ...] = (
+    "model",
+    "quality",
+    "output_format",
+    "output_compression",
+    "background",
+    "moderation",
+    "action",
+    "input_fidelity",
+    "partial_images",
+)
+IMAGE_TOOL_LEGACY_FIELD_KEYS: tuple[str, ...] = ("n",)
+DEFAULT_IMAGE_TOOL_ALLOWED_FIELDS: tuple[str, ...] = tuple(key for key in IMAGE_TOOL_FIELD_KEYS if key != "background")
+DEFAULT_IMAGE_TOOL_ALLOWED_FIELDS_TEXT = ",".join(DEFAULT_IMAGE_TOOL_ALLOWED_FIELDS)
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_LOG_DIR = BACKEND_DIR / "storage" / "logs"
+DEFAULT_PROMPT_BRIEF_SYSTEM = (
+    "You analyze ecommerce product facts from the JSON task data in the user message. "
+    "Extract positioning, audience, supported selling angles, taboo phrases, and visual style guidance. "
+    "Use only supplied facts; mark sparse facts conservatively."
+)
+DEFAULT_PROMPT_COPY_SYSTEM = (
+    "You generate editable ecommerce copy from the JSON task data in the user message. "
+    "The structured-output schema owns the response fields. Write concise copy that fits the declared purpose, "
+    "language policy, available facts, and reference-image context. Use only supplied facts."
+)
+DEFAULT_PROMPT_POSTER_IMAGE_TEMPLATE = """Create an image from the current user request and explicitly connected
+upstream context.
+User request:
+{instruction}
+Output size: {size}
+Upstream context:
+{context_block}
+Visual reference policy:
+{reference_policy}
+{kind_requirements}
+Generate the image directly. Do not return explanatory text."""
+DEFAULT_PROMPT_POSTER_IMAGE_EDIT_TEMPLATE = DEFAULT_PROMPT_POSTER_IMAGE_TEMPLATE
+DEFAULT_PROMPT_POSTER_IMAGE_REFERENCE_POLICY = (
+    "When input images are provided, use the actual product/subject in those images as the visual baseline. "
+    "If text facts are weak, prioritize the visible product subject. Do not replace it with unrelated people, IP, "
+    "brands, products, or ad themes. Treat copy as auxiliary selling-point and layout context."
+)
+DEFAULT_PROMPT_IMAGE_CHAT_TEMPLATE = """Create an image from the current user request.
+Output size: {size}
+{history_block}
+Current user request:
+{prompt}
+Generate the image directly. Do not return explanatory text."""
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigOption:
+    value: str
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigDefinition:
+    key: str
+    label: str
+    category: str
+    input_type: ConfigInputType
+    description: str = ""
+    options: tuple[ConfigOption, ...] = ()
+    secret: bool = False
+    minimum: int | None = None
+    maximum: int | None = None
+    optional: bool = False
+
+
+class Settings(BaseSettings):
+    """应用配置：环境变量 + 数据库覆盖。
+
+    基础设施配置（数据库 / Redis / Secret 等）仅从环境变量读取，
+    业务配置可在运行时通过 app_settings 表覆盖。历史 text/image provider 字段仅作为供应商迁移输入。
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    app_env: str = "development"
+    app_host: str = "0.0.0.0"
+    app_port: int = 29280
+    backend_cors_origins: str = "http://localhost:29281,http://127.0.0.1:29281"
+    session_cookie_secure: bool = False
+
+    admin_access_key: str = Field(min_length=8)
+    settings_access_token: str | None = None
+    session_secret: str = Field(min_length=16)
+
+    database_url: str
+    redis_url: str
+    storage_root: Path = Path("./backend/storage")
+
+    log_dir: Path = DEFAULT_LOG_DIR
+    log_level: str = "INFO"
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
+    log_retention_days: int = 14
+
+    text_provider_kind: str = "mock"
+    text_api_key: str | None = None
+    text_base_url: str | None = None
+    text_brief_model: str = "gpt-4o"
+    text_copy_model: str = "gpt-4o"
+
+    image_provider_kind: str = "mock"
+    image_api_key: str | None = None
+    image_base_url: str | None = None
+    image_generate_model: str = "gpt-5.4"
+    image_images_quality: str | None = None
+    image_images_style: str | None = None
+    image_responses_background_enabled: bool = False
+    image_tool_model: str | None = None
+    image_tool_quality: str | None = None
+    image_tool_output_format: str | None = None
+    image_tool_output_compression: int | None = Field(default=None, ge=0, le=100)
+    image_tool_background: str | None = None
+    image_tool_moderation: str | None = None
+    image_tool_action: str | None = None
+    image_tool_input_fidelity: str | None = None
+    image_tool_partial_images: int | None = Field(default=None, ge=0, le=3)
+    image_tool_n: int | None = Field(default=None, ge=1, le=10)
+    image_tool_allowed_fields: str = DEFAULT_IMAGE_TOOL_ALLOWED_FIELDS_TEXT
+    image_generation_max_dimension: int = Field(
+        default=DEFAULT_IMAGE_GENERATION_MAX_DIMENSION,
+        ge=IMAGE_GENERATION_MIN_MAX_DIMENSION,
+        le=IMAGE_GENERATION_MAX_MAX_DIMENSION,
+    )
+    image_main_image_size: str = "1024x1024"
+    image_promo_poster_size: str = "1024x1536"
+    poster_generation_mode: str = "template"
+
+    poster_font_path: Path = Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")
+
+    prompt_brief_system: str = DEFAULT_PROMPT_BRIEF_SYSTEM
+    prompt_copy_system: str = DEFAULT_PROMPT_COPY_SYSTEM
+    prompt_poster_image_template: str = DEFAULT_PROMPT_POSTER_IMAGE_TEMPLATE
+    prompt_poster_image_edit_template: str = DEFAULT_PROMPT_POSTER_IMAGE_EDIT_TEMPLATE
+    prompt_poster_image_reference_policy: str = DEFAULT_PROMPT_POSTER_IMAGE_REFERENCE_POLICY
+    prompt_image_chat_template: str = DEFAULT_PROMPT_IMAGE_CHAT_TEMPLATE
+
+    upload_max_image_bytes: int = 10 * 1024 * 1024
+    upload_max_reference_images: int = 6
+    upload_max_pixels: int = 16_000_000
+    upload_allowed_image_mime_types: str = "image/png,image/jpeg,image/webp"
+
+    generation_max_concurrent_tasks: int = Field(default=3, ge=1, le=20)
+    image_session_stale_running_after_minutes: int = Field(
+        default=DEFAULT_IMAGE_SESSION_IDLE_TIMEOUT_MINUTES,
+        ge=IMAGE_SESSION_IDLE_TIMEOUT_MIN_MINUTES,
+        le=IMAGE_SESSION_IDLE_TIMEOUT_MAX_MINUTES,
+    )
+    image_session_worker_failsafe_time_limit_minutes: int = Field(
+        default=DEFAULT_IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MINUTES,
+        ge=IMAGE_SESSION_IDLE_TIMEOUT_MIN_MINUTES,
+        le=IMAGE_SESSION_IDLE_TIMEOUT_MAX_MINUTES,
+    )
+    workflow_image_generation_provider_timeout_seconds: int = Field(
+        default=DEFAULT_WORKFLOW_IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS,
+        ge=1,
+        le=24 * 60 * 60,
+    )
+    admin_access_required: bool = True
+    deletion_enabled: bool = False
+
+    @field_validator("image_main_image_size", "image_promo_poster_size")
+    @classmethod
+    def _normalize_image_generation_fallback_size(cls, value: str, info: ValidationInfo) -> str:
+        max_dimension = int(info.data.get("image_generation_max_dimension") or DEFAULT_IMAGE_GENERATION_MAX_DIMENSION)
+        return normalize_image_generation_size(value, max_dimension=max_dimension)
+
+    @field_validator(
+        "image_tool_model",
+        "image_tool_quality",
+        "image_tool_output_format",
+        "image_tool_background",
+        "image_tool_moderation",
+        "image_tool_action",
+        "image_tool_input_fidelity",
+        "image_images_quality",
+        "image_images_style",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_optional_image_tool_text(cls, value: Any) -> str | None:
+        normalized = "" if value is None else str(value).strip()
+        return normalized or None
+
+    @field_validator("image_tool_output_compression", "image_tool_partial_images", "image_tool_n", mode="before")
+    @classmethod
+    def _normalize_optional_image_tool_int(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return int(value)
+
+    @field_validator("image_tool_allowed_fields", mode="before")
+    @classmethod
+    def _normalize_image_tool_allowed_fields(cls, value: Any) -> str:
+        return normalize_image_tool_allowed_fields(value)
+
+    @model_validator(mode="after")
+    def _validate_distinct_settings_token(self) -> Settings:
+        if self.settings_access_token and self.settings_access_token.strip() == self.admin_access_key:
+            raise ValueError("SETTINGS_ACCESS_TOKEN 必须与 ADMIN_ACCESS_KEY 分开设置")
+        return self
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.backend_cors_origins.split(",") if origin.strip()]
+
+    @property
+    def allowed_image_mime_types(self) -> set[str]:
+        return {
+            mime_type.strip().lower()
+            for mime_type in self.upload_allowed_image_mime_types.split(",")
+            if mime_type.strip()
+        }
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Bootstrap settings loaded from env.
+
+    Infrastructure settings such as database URL, Redis URL, session secret and
+    admin key intentionally stay env-backed because the app needs them before it
+    can read any database-stored configuration.
+    """
+
+    return Settings()
+
+
+CONFIG_DEFINITIONS: tuple[ConfigDefinition, ...] = (
+    ConfigDefinition(
+        key="image_tool_allowed_fields",
+        label="可用 Tool 字段",
+        category="图片工具参数",
+        input_type="multi_select",
+        options=tuple(ConfigOption(key, key) for key in IMAGE_TOOL_FIELD_KEYS),
+        description=(
+            "控制前端可展示、后端可持久化并发送给 Responses image_generation tool 的高级字段；"
+            "Images API n 由候选数量或下游承载节点数自动计算，不作为可选字段展示。"
+        ),
+    ),
+    ConfigDefinition(
+        key="image_tool_model",
+        label="Tool 模型",
+        category="图片工具参数",
+        input_type="text",
+        description="留空不发送；需要 provider 支持。",
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_quality",
+        label="质量",
+        category="图片工具参数",
+        input_type="select",
+        options=(
+            ConfigOption("", "默认"),
+            ConfigOption("auto", "Auto"),
+            ConfigOption("low", "Low"),
+            ConfigOption("medium", "Medium"),
+            ConfigOption("high", "High"),
+        ),
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_output_format",
+        label="格式",
+        category="图片工具参数",
+        input_type="select",
+        options=(
+            ConfigOption("", "默认"),
+            ConfigOption("png", "PNG"),
+            ConfigOption("jpeg", "JPEG"),
+            ConfigOption("webp", "WebP"),
+        ),
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_output_compression",
+        label="压缩",
+        category="图片工具参数",
+        input_type="number",
+        description="0-100；留空不发送。",
+        minimum=0,
+        maximum=100,
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_background",
+        label="背景",
+        category="图片工具参数",
+        input_type="select",
+        options=(
+            ConfigOption("", "默认"),
+            ConfigOption("auto", "Auto"),
+            ConfigOption("opaque", "Opaque"),
+            ConfigOption("transparent", "Transparent"),
+        ),
+        description="仅在可用 Tool 字段勾选 background 后发送。",
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_moderation",
+        label="审核",
+        category="图片工具参数",
+        input_type="select",
+        options=(ConfigOption("", "默认"), ConfigOption("auto", "Auto"), ConfigOption("low", "Low")),
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_action",
+        label="Action",
+        category="图片工具参数",
+        input_type="select",
+        options=(
+            ConfigOption("", "默认"),
+            ConfigOption("auto", "Auto"),
+            ConfigOption("generate", "Generate"),
+            ConfigOption("edit", "Edit"),
+        ),
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_input_fidelity",
+        label="Input fidelity",
+        category="图片工具参数",
+        input_type="select",
+        options=(ConfigOption("", "默认"), ConfigOption("low", "Low"), ConfigOption("high", "High")),
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_tool_partial_images",
+        label="Partial",
+        category="图片工具参数",
+        input_type="number",
+        description="0-3；留空不发送。",
+        minimum=0,
+        maximum=3,
+        optional=True,
+    ),
+    ConfigDefinition(
+        key="image_generation_max_dimension",
+        label="生图最大单边",
+        category="图片生成",
+        input_type="number",
+        description="文/图生图和工作流生图的最大宽/高像素；最大面积同步使用该值的平方。",
+        minimum=IMAGE_GENERATION_MIN_MAX_DIMENSION,
+        maximum=IMAGE_GENERATION_MAX_MAX_DIMENSION,
+    ),
+    ConfigDefinition(
+        key="image_main_image_size",
+        label="主图尺寸（兼容默认）",
+        category="图片生成",
+        input_type="text",
+        description=(
+            "高级/兼容默认值：仅当图片 provider 输入未显式传入 image_size，"
+            "且生成类型为 MAIN_IMAGE 时使用。新工作流生图节点通常会传入明确尺寸，"
+            "请优先使用节点里的尺寸选择器。"
+        ),
+    ),
+    ConfigDefinition(
+        key="image_promo_poster_size",
+        label="促销海报尺寸（兼容默认）",
+        category="图片生成",
+        input_type="text",
+        description=(
+            "高级/兼容默认值：仅当图片 provider 输入未显式传入 image_size，"
+            "且生成类型为 PROMO_POSTER 时使用。新工作流生图节点通常会传入明确尺寸，"
+            "请优先使用节点里的尺寸选择器。"
+        ),
+    ),
+    ConfigDefinition(
+        key="poster_generation_mode",
+        label="海报生成模式",
+        category="海报与上传",
+        input_type="select",
+        options=(ConfigOption("template", "模板渲染"), ConfigOption("generated", "AI 生成")),
+        description="本地模板用于 mock/dev fallback；绑定真实图片供应商时工作流生图自动使用 AI 生成。",
+    ),
+    ConfigDefinition(
+        key="poster_font_path",
+        label="海报字体路径",
+        category="海报与上传",
+        input_type="text",
+        description="模板海报和 mock 图片中用于中文文字渲染的字体文件。",
+    ),
+    ConfigDefinition(
+        key="prompt_brief_system",
+        label="商品理解系统提示词",
+        category="提示词",
+        input_type="textarea",
+        description="用于商品资料理解；结构化输出由后端 schema 和 provider structured output 约束。",
+    ),
+    ConfigDefinition(
+        key="prompt_copy_system",
+        label="文案生成系统提示词",
+        category="提示词",
+        input_type="textarea",
+        description="用于主图/海报文案生成；结构化输出由后端 schema 和 provider structured output 约束。",
+    ),
+    ConfigDefinition(
+        key="prompt_poster_image_template",
+        label="海报生图提示词模板",
+        category="提示词",
+        input_type="textarea",
+        description=(
+            "用于工作台 AI 生图。可用占位符：instruction、size、context_block、reference_policy、"
+            "kind、kind_label、kind_requirements。"
+        ),
+    ),
+    ConfigDefinition(
+        key="prompt_poster_image_edit_template",
+        label="工作台改图提示词模板",
+        category="提示词",
+        input_type="textarea",
+        description=(
+            "用于工作台带参考图或上游上下文的改图任务。可用占位符：instruction、size、context_block、"
+            "reference_policy、kind、kind_label、kind_requirements。"
+        ),
+    ),
+    ConfigDefinition(
+        key="prompt_poster_image_reference_policy",
+        label="工作台视觉参考规则",
+        category="提示词",
+        input_type="textarea",
+        description="用于工作台生图模板的 reference_policy 占位符，可在设置中调整图片主体优先级规则。",
+    ),
+    ConfigDefinition(
+        key="prompt_image_chat_template",
+        label="文/图生图提示词模板",
+        category="提示词",
+        input_type="textarea",
+        description="用于文/图生图对话。可用占位符：prompt、size、history_block。",
+    ),
+    ConfigDefinition(
+        key="upload_max_image_bytes",
+        label="单图最大字节数",
+        category="海报与上传",
+        input_type="number",
+        minimum=1,
+    ),
+    ConfigDefinition(
+        key="upload_max_reference_images",
+        label="最多参考图数量",
+        category="海报与上传",
+        input_type="number",
+        minimum=0,
+    ),
+    ConfigDefinition(
+        key="upload_max_pixels",
+        label="最大像素数",
+        category="海报与上传",
+        input_type="number",
+        minimum=1,
+    ),
+    ConfigDefinition(
+        key="upload_allowed_image_mime_types",
+        label="允许图片 MIME",
+        category="海报与上传",
+        input_type="textarea",
+        description="逗号分隔，例如 image/png,image/jpeg,image/webp。",
+    ),
+    ConfigDefinition(
+        key="generation_max_concurrent_tasks",
+        label="全局生成并发上限",
+        category="生成队列",
+        input_type="number",
+        description="全局资源保护阈值；工作流和文/图生图达到上限时会提示稍后重试。",
+        minimum=1,
+        maximum=20,
+    ),
+    ConfigDefinition(
+        key="image_session_stale_running_after_minutes",
+        label="文/图生图进度闲置恢复阈值（分钟）",
+        category="生成队列",
+        input_type="number",
+        description=(
+            "worker 启动恢复时，running 文/图生图任务会按最近 progress heartbeat 判断是否闲置；"
+            "旧任务没有 progress 时回退到 started_at。"
+        ),
+        minimum=IMAGE_SESSION_IDLE_TIMEOUT_MIN_MINUTES,
+        maximum=IMAGE_SESSION_IDLE_TIMEOUT_MAX_MINUTES,
+    ),
+    ConfigDefinition(
+        key="workflow_image_generation_provider_timeout_seconds",
+        label="工作流生图 Provider 超时（秒）",
+        category="生成队列",
+        input_type="number",
+        description="工作流 AI 生图节点单次 provider 调用的项目级超时上界；超时后会安全失败并释放生成队列容量。",
+        minimum=1,
+        maximum=24 * 60 * 60,
+    ),
+    ConfigDefinition(
+        key="admin_access_required",
+        label="要求登录访问密钥",
+        category="安全与运维",
+        input_type="boolean",
+        description=(
+            "默认开启，普通工作台和私有 API 需要 ADMIN_ACCESS_KEY 登录；关闭后仍需 SETTINGS_ACCESS_TOKEN "
+            "才能查看和修改系统配置。"
+        ),
+    ),
+    ConfigDefinition(
+        key="deletion_enabled",
+        label="启用业务删除",
+        category="安全与运维",
+        input_type="boolean",
+        description="默认关闭，用于体验站禁止整条商品和文/图生图会话被删除，保留溯源证据。",
+    ),
+)
+
+CONFIG_DEFINITION_BY_KEY: dict[str, ConfigDefinition] = {
+    definition.key: definition for definition in CONFIG_DEFINITIONS
+}
+RUNTIME_CONFIG_KEYS: set[str] = set(CONFIG_DEFINITION_BY_KEY)
+
+
+def normalize_image_size(value: Any, *, label: str = "图片尺寸") -> str:
+    """校验并标准化图片尺寸格式 宽x高。"""
+    normalized = "" if value is None else str(value).strip().lower()
+    if not IMAGE_SIZE_PATTERN.fullmatch(normalized):
+        raise ValueError(f"{label} 必须使用 宽x高 格式，例如 1024x1024")
+    width, height = (int(part) for part in normalized.split("x", maxsplit=1))
+    if width <= 0 or height <= 0:
+        raise ValueError(f"{label} 宽高必须大于 0")
+    return normalized
+
+
+def _runtime_image_generation_max_dimension() -> int:
+    return int(get_runtime_settings().image_generation_max_dimension)
+
+
+def _image_generation_max_dimension_multiple(max_dimension: int) -> int:
+    return max_dimension - (max_dimension % IMAGE_GENERATION_DIMENSION_MULTIPLE)
+
+
+def _nearest_image_generation_dimension_multiple(value: int, *, max_dimension: int) -> int:
+    lower = (value // IMAGE_GENERATION_DIMENSION_MULTIPLE) * IMAGE_GENERATION_DIMENSION_MULTIPLE
+    upper = lower + IMAGE_GENERATION_DIMENSION_MULTIPLE
+    candidates = [
+        candidate
+        for candidate in {lower, upper}
+        if IMAGE_GENERATION_MIN_DIMENSION <= candidate <= max_dimension
+    ]
+    if candidates:
+        return min(candidates, key=lambda candidate: (abs(candidate - value), candidate))
+    if value < IMAGE_GENERATION_MIN_DIMENSION:
+        return IMAGE_GENERATION_MIN_DIMENSION
+    return max_dimension
+
+
+def normalize_image_generation_size(
+    value: Any,
+    *,
+    label: str = "图片尺寸",
+    max_dimension: int | None = None,
+) -> str:
+    """校验并校准生图尺寸，包含格式、正数和运行时安全边界。"""
+    normalized = normalize_image_size(value, label=label)
+    resolved_max_dimension = int(max_dimension or _runtime_image_generation_max_dimension())
+    if (
+        resolved_max_dimension < IMAGE_GENERATION_MIN_MAX_DIMENSION
+        or resolved_max_dimension > IMAGE_GENERATION_MAX_MAX_DIMENSION
+    ):
+        raise ValueError(
+            f"生图最大单边必须在 {IMAGE_GENERATION_MIN_MAX_DIMENSION}-{IMAGE_GENERATION_MAX_MAX_DIMENSION} 之间"
+        )
+    effective_max_dimension = _image_generation_max_dimension_multiple(resolved_max_dimension)
+    max_pixels = effective_max_dimension * effective_max_dimension
+    width, height = (int(part) for part in normalized.split("x", maxsplit=1))
+    scale = min(1.0, effective_max_dimension / width, effective_max_dimension / height)
+    resolved_width = min(effective_max_dimension, max(IMAGE_GENERATION_MIN_DIMENSION, round(width * scale)))
+    resolved_height = min(effective_max_dimension, max(IMAGE_GENERATION_MIN_DIMENSION, round(height * scale)))
+    if resolved_width * resolved_height > max_pixels:
+        pixel_scale = (max_pixels / (resolved_width * resolved_height)) ** 0.5
+        resolved_width = max(1, int(resolved_width * pixel_scale))
+        resolved_height = max(1, int(resolved_height * pixel_scale))
+    resolved_width = _nearest_image_generation_dimension_multiple(resolved_width, max_dimension=effective_max_dimension)
+    resolved_height = _nearest_image_generation_dimension_multiple(
+        resolved_height,
+        max_dimension=effective_max_dimension,
+    )
+    return f"{resolved_width}x{resolved_height}"
+
+
+def parse_image_tool_allowed_fields(value: Any) -> tuple[str, ...]:
+    if value is None:
+        parts: list[str] = []
+    elif isinstance(value, str):
+        parts = [part.strip() for part in re.split(r"[\s,]+", value) if part.strip()]
+    elif isinstance(value, list | tuple | set):
+        parts = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        parts = [str(value).strip()] if str(value).strip() else []
+
+    selected = set(parts)
+    unknown = selected - set(IMAGE_TOOL_FIELD_KEYS) - set(IMAGE_TOOL_LEGACY_FIELD_KEYS)
+    if unknown:
+        raise ValueError(f"可用 Tool 字段包含不支持的字段: {', '.join(sorted(unknown))}")
+    return tuple(key for key in IMAGE_TOOL_FIELD_KEYS if key in selected)
+
+
+def normalize_image_tool_allowed_fields(value: Any) -> str:
+    return ",".join(parse_image_tool_allowed_fields(value))
+
+
+def filter_image_tool_options(
+    tool_options: Mapping[str, Any] | None,
+    *,
+    allowed_fields: tuple[str, ...] | None = None,
+) -> dict[str, Any] | None:
+    if not tool_options:
+        return None
+    resolved_allowed_fields = (
+        allowed_fields
+        if allowed_fields is not None
+        else parse_image_tool_allowed_fields(get_runtime_settings().image_tool_allowed_fields)
+    )
+    selected_fields = set(resolved_allowed_fields)
+    normalized = {
+        str(key): value
+        for key, value in tool_options.items()
+        if str(key) in selected_fields
+        and value is not None
+        and not (isinstance(value, str) and not value.strip())
+    }
+    return normalized or None
+
+
+def normalize_config_value(key: str, value: Any) -> str:
+    definition = CONFIG_DEFINITION_BY_KEY.get(key)
+    if definition is None:
+        raise ValueError(f"未知配置项: {key}")
+
+    if definition.input_type == "boolean":
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        normalized_bool = str(value).strip().lower()
+        if normalized_bool in {"1", "true", "yes", "on"}:
+            return "true"
+        if normalized_bool in {"0", "false", "no", "off"}:
+            return "false"
+        raise ValueError(f"{definition.label} 必须是布尔值")
+
+    if definition.input_type == "multi_select":
+        return normalize_image_tool_allowed_fields(value)
+
+    if definition.input_type == "number":
+        if definition.optional and (value is None or str(value).strip() == ""):
+            return ""
+        try:
+            normalized_int = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{definition.label} 必须是整数") from exc
+        if definition.minimum is not None and normalized_int < definition.minimum:
+            raise ValueError(f"{definition.label} 不能小于 {definition.minimum}")
+        if definition.maximum is not None and normalized_int > definition.maximum:
+            raise ValueError(f"{definition.label} 不能大于 {definition.maximum}")
+        return str(normalized_int)
+
+    if key in IMAGE_SIZE_CONFIG_KEYS:
+        return normalize_image_generation_size(value, label=definition.label)
+    normalized = "" if value is None else str(value).strip()
+    if key in PROMPT_CONFIG_KEYS and not normalized:
+        raise ValueError(f"{definition.label} 不能为空；如需回到默认值请使用恢复默认")
+    if definition.input_type == "select":
+        allowed_values = {option.value for option in definition.options}
+        if normalized not in allowed_values:
+            allowed_text = ", ".join(sorted(allowed_values))
+            raise ValueError(f"{definition.label} 必须是以下之一: {allowed_text}")
+    return normalized
+
+
+def normalize_config_values(values: Mapping[str, Any]) -> dict[str, str]:
+    return {key: normalize_config_value(key, value) for key, value in values.items()}
+
+
+def build_settings_with_overrides(overrides: Mapping[str, str]) -> Settings:
+    try:
+        return Settings(**dict(overrides))
+    except ValidationError as exc:
+        first_error = exc.errors()[0] if exc.errors() else {}
+        field = ".".join(str(part) for part in first_error.get("loc", []))
+        message = first_error.get("msg") or str(exc)
+        raise ValueError(f"配置校验失败 {field}: {message}") from exc
+
+
+def _load_database_config_overrides() -> dict[str, str]:
+    try:
+        from productflow_backend.infrastructure.db.models import AppSetting
+        from productflow_backend.infrastructure.db.session import get_session_factory
+
+        session = get_session_factory()()
+        try:
+            rows = session.scalars(select(AppSetting).where(AppSetting.key.in_(RUNTIME_CONFIG_KEYS))).all()
+            return {row.key: row.value for row in rows}
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ in {"OperationalError", "ProgrammingError"}:
+            return {}
+        if isinstance(exc, SQLAlchemyError):
+            return {}
+        raise
+
+
+def get_runtime_settings() -> Settings:
+    """Settings with database overrides applied.
+
+    If a key does not exist in the database, env/default Settings remains the
+    fallback. Missing app_settings table is tolerated so fresh databases can
+    still start before migrations have run.
+    """
+
+    overrides = _load_database_config_overrides()
+    if not overrides:
+        return get_settings()
+    return build_settings_with_overrides(overrides)
