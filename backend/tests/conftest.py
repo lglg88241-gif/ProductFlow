@@ -36,6 +36,28 @@ def configured_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("TEXT_PROVIDER_KIND", "mock")
     monkeypatch.setenv("IMAGE_PROVIDER_KIND", "mock")
     monkeypatch.setenv("POSTER_GENERATION_MODE", "template")
+    # 隔离开发者本机 .env 文件（AGENT_*/IMAGE_* 自提供配置），保证测试走 DB 绑定路径
+    from productflow_backend.config import Settings
+
+    monkeypatch.setattr(
+        Settings,
+        "model_config",
+        {**Settings.model_config, "env_file": None},
+    )
+    for var in (
+        "AGENT_PROVIDER_KIND",
+        "AGENT_API_KEY",
+        "AGENT_BASE_URL",
+        "AGENT_MODEL",
+        "AGENT_FALLBACK_API_KEY",
+        "AGENT_FALLBACK_BASE_URL",
+        "AGENT_FALLBACK_MODEL",
+        "IMAGE_PROVIDER_KIND",
+        "IMAGE_API_KEY",
+        "IMAGE_BASE_URL",
+        "IMAGE_GENERATE_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
     get_settings.cache_clear()
     get_engine.cache_clear()

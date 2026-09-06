@@ -223,12 +223,12 @@ def test_agent_config_falls_back_to_env_variables(configured_env: Path, monkeypa
     assert resolved.fallback_api_key == "relay-key"
 
 
-def test_ui_binding_overrides_env_variables(
+def test_ui_binding_overridden_by_env_variables(
     configured_env: Path,
     unlocked_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """界面上配置的 agent 绑定优先于 .env（其余照常）。"""
+    """.env 自提供时优先于界面绑定（用户明确要求 env 为权威来源）。"""
     monkeypatch.setenv("AGENT_PROVIDER_KIND", "openai")
     monkeypatch.setenv("AGENT_API_KEY", "env-key")
     monkeypatch.setenv("AGENT_BASE_URL", "https://env.example.com/v1")
@@ -245,12 +245,11 @@ def test_ui_binding_overrides_env_variables(
     assert updated.status_code == 200
 
     resolved = resolve_agent_provider_config()
-    assert resolved.api_key is None or resolved.base_url != "https://env.example.com/v1"
-    assert resolved.base_url == "https://ui.example.com/v1"
-    assert resolved.provider_profile_id == profile_id
+    assert resolved.base_url == "https://env.example.com/v1"
+    assert resolved.api_key == "env-key"
 
 
-def test_image_config_falls_back_to_env_variables(configured_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_image_env_variables_take_precedence_over_ui_binding(configured_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """生图绑定保持 mock 时，.env 的 IMAGE_* 直读生效（中转 gpt-image-2 场景）。"""
     monkeypatch.setenv("IMAGE_PROVIDER_KIND", "openai_images")
     monkeypatch.setenv("IMAGE_API_KEY", "relay-image-key")
@@ -267,7 +266,7 @@ def test_image_config_falls_back_to_env_variables(configured_env: Path, monkeypa
     assert resolved.api_key == "relay-image-key"
     assert resolved.base_url == "https://relay.example.com/v1"
 
-    # 界面上配置的 image 绑定（openai_*）优先于 env
+    # .env 自提供时优先于界面绑定（用户要求 env 为权威来源）
     from productflow_backend.presentation.api import create_app
 
     unlocked_client = TestClient(create_app())
@@ -291,7 +290,8 @@ def test_image_config_falls_back_to_env_variables(configured_env: Path, monkeypa
     )
     assert bound.status_code == 200, bound.text
     resolved_after = resolve_image_provider_config()
-    assert resolved_after.provider_profile_id == profile_id
-    assert resolved_after.base_url == "https://relay.example.com/v1"
+    assert resolved_after.provider_kind == "openai_images"
+    assert resolved_after.api_key == "relay-image-key"
+    assert resolved_after.provider_profile_id is None
 
 

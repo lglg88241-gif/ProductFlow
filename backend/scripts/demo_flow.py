@@ -56,7 +56,7 @@ class DemoRunner:
     deletion_enabled: bool = False
 
     def __post_init__(self) -> None:
-        self.client = httpx.Client(base_url=self.base_url, timeout=120.0)
+        self.client = httpx.Client(base_url=self.base_url, timeout=420.0)
 
     # ------------------------------------------------------------------
     def step(self, category: str, name: str, func, *, note: str = "") -> StepResult:

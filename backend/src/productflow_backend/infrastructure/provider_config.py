@@ -429,16 +429,18 @@ def _agent_config_from_env() -> ResolvedAgentProviderConfig:
 def resolve_agent_provider_config() -> ResolvedAgentProviderConfig:
     """设计师 Agent 的供应商解析：主供应商 + 可选降级（fallback）供应商。
 
-    优先级：界面上配置的 agent 绑定（openai）> .env 的 AGENT_* 环境变量 > mock。
+    优先级：.env 的 AGENT_* 环境变量 > 界面上配置的 agent 绑定 > mock。
+    用户在 .env 自提供 API（中转场景）时始终以其为准；清空 .env 的
+    AGENT_PROVIDER_KIND 才会回落到界面配置。
     """
     session = get_session_factory()()
     try:
+        env_config = _agent_config_from_env()
+        if env_config.provider_kind == "openai":
+            return env_config
         ensure_provider_config_bootstrapped(session)
         binding = _get_binding(session, AGENT_PURPOSE)
         if binding is None or binding.provider_kind == "mock":
-            env_config = _agent_config_from_env()
-            if env_config.provider_kind == "openai":
-                return env_config
             if binding is None:
                 raise RuntimeError("设计师 Agent 供应商未配置：请在 .env 填写 AGENT_* 或在系统设置中绑定")
             return ResolvedAgentProviderConfig(
@@ -552,16 +554,19 @@ def _image_config_from_env() -> ResolvedImageProviderConfig | None:
 
 
 def resolve_image_provider_config() -> ResolvedImageProviderConfig:
-    """生图供应商解析。优先级：界面配置的 image 绑定（openai_*）> .env 的 IMAGE_* > mock。"""
+    """生图供应商解析。优先级：.env 的 IMAGE_* 环境变量 > 界面配置的 image 绑定 > mock。
+
+    用户在 .env 自提供 API（中转场景）时始终以其为准。
+    """
+    env_config = _image_config_from_env()
+    if env_config is not None:
+        return env_config
     session = get_session_factory()()
     try:
         ensure_provider_config_bootstrapped(session)
         binding = _require_binding(session, IMAGE_PURPOSE)
         kind = binding.provider_kind
         if kind == "mock":
-            env_config = _image_config_from_env()
-            if env_config is not None:
-                return env_config
             return ResolvedImageProviderConfig(
                 provider_kind="mock",
                 model=_require_text_value(binding.model_settings_json, "model", "图片模型未配置"),
