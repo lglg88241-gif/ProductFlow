@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
 
+import httpx
 from openai import OpenAI
 
 from productflow_backend.application.contracts import PosterGenerationInput
@@ -107,6 +108,18 @@ class ImagesReferenceImage:
     filename: str
 
 
+def _download_remote_image(url: str, *, timeout: float = 120.0) -> bytes | None:
+    """下载中转站返回的图片 URL；失败返回 None 由上层统一报错。"""
+    try:
+        response = httpx.get(url, timeout=timeout, follow_redirects=True)
+        response.raise_for_status()
+        content = response.content
+    except httpx.HTTPError:
+        logging.getLogger(__name__).warning("下载中转站图片 URL 失败: %s", url[:200])
+        return None
+    return content or None
+
+
 def _mime_type_from_image_bytes(data: bytes) -> str:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
@@ -157,9 +170,16 @@ class OpenAIImagesClient:
             safe_provider_output["_productflow"] = productflow_metadata
         for item in getattr(response, "data", []) or []:
             b64 = getattr(item, "b64_json", None)
-            if not b64:
+            image_bytes: bytes | None = None
+            if b64:
+                image_bytes = decode_b64_image(b64)
+            else:
+                # 部分中转站返回 URL 而非 b64_json；下载后仍按本地字节处理
+                remote_url = getattr(item, "url", None)
+                if remote_url:
+                    image_bytes = _download_remote_image(remote_url)
+            if not image_bytes:
                 continue
-            image_bytes = decode_b64_image(b64)
             results.append(
                 ImagesAPIResult(
                     bytes_data=image_bytes,
