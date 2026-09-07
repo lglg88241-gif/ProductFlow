@@ -41,6 +41,7 @@ services:
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-production}
+      ADMIN_ACCESS_REQUIRED: ${ADMIN_ACCESS_REQUIRED:-true}
       APP_HOST: 0.0.0.0
       APP_PORT: 29280
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:29281,http://127.0.0.1:29281}
