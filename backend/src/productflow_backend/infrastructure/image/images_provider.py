@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any
 
-import httpx
 from openai import OpenAI
 
 from productflow_backend.application.contracts import PosterGenerationInput
@@ -31,6 +30,7 @@ from productflow_backend.infrastructure.image.base import (
 )
 from productflow_backend.infrastructure.image.responses_provider import (
     build_responses_reference_images_from_poster,
+    image_provider_http_timeout,
     poster_has_reference_input,
 )
 from productflow_backend.infrastructure.prompts import render_prompt_template
@@ -38,6 +38,7 @@ from productflow_backend.infrastructure.provider_config import (
     ResolvedImageProviderConfig,
     resolve_image_provider_config,
 )
+from productflow_backend.infrastructure.remote_fetch import RemoteFetchError, fetch_remote_image
 
 logger = logging.getLogger(__name__)
 
@@ -115,17 +116,24 @@ class ImagesReferenceImage:
 
 
 def _download_remote_image(url: str, *, timeout: float = 120.0) -> bytes | None:
-    """下载中转站返回的图片 URL（含重试，临时链接可能尚未就绪）；失败返回 None。"""
+    """下载中转站返回的图片 URL（含重试，临时链接可能尚未就绪）；失败返回 None。
+
+    统一走 remote_fetch 安全封装：协议白名单、私网 IP 拦截（含逐跳重定向复检）、
+    响应体大小上限；下载失败或返回空内容时按原语义整体重试。
+    """
     for attempt in range(REMOTE_IMAGE_DOWNLOAD_RETRIES + 1):
         try:
-            response = httpx.get(url, timeout=timeout, follow_redirects=True)
-            response.raise_for_status()
-            content = response.content
+            content = fetch_remote_image(url, timeout=timeout)
             if content:
                 return content
             logger.warning("中转站图片 URL 返回空内容: attempt=%s url=%s", attempt + 1, url[:160])
-        except httpx.HTTPError as exc:
-            logger.warning("下载中转站图片 URL 失败: attempt=%s error=%s", attempt + 1, type(exc).__name__)
+        except RemoteFetchError as exc:
+            logger.warning(
+                "下载中转站图片 URL 失败: attempt=%s reason=%s error=%s",
+                attempt + 1,
+                exc.reason,
+                exc,
+            )
         if attempt < REMOTE_IMAGE_DOWNLOAD_RETRIES:
             time.sleep(EMPTY_OUTPUT_RETRY_DELAY_SECONDS)
     return None
@@ -157,7 +165,11 @@ class OpenAIImagesClient:
     def _client(self) -> OpenAI:
         if not self.api_key:
             raise RuntimeError("图片供应商档案缺少 API Key")
-        kwargs: dict[str, Any] = {"api_key": self.api_key}
+        kwargs: dict[str, Any] = {
+            "api_key": self.api_key,
+            # 生图链路统一超时预算：默认 SDK 600s/调用太宽， worker time_limit 兜底前必须有明确 deadline
+            "timeout": image_provider_http_timeout(),
+        }
         if self.base_url:
             kwargs["base_url"] = self.base_url
         return OpenAI(**kwargs)

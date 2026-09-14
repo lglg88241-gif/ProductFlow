@@ -6,10 +6,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import httpx
 from openai import OpenAI
 
 from productflow_backend.application.contracts import PosterGenerationInput
@@ -44,10 +45,32 @@ RESPONSES_IN_PROGRESS_STATUSES = {"queued", "in_progress"}
 RESPONSES_TERMINAL_FAILURE_STATUSES = {"failed", "cancelled", "canceled", "incomplete", "expired"}
 PROVIDER_REQUEST_FAILURE_MESSAGE = "图片供应商请求失败，请检查供应商配置后重试"
 PROVIDER_BACKGROUND_INCOMPLETE_MESSAGE = "图片供应商后台生成未完成，请稍后重试"
+PROVIDER_BACKGROUND_POLL_TIMEOUT_MESSAGE = "图片供应商后台生成超时，请稍后重试"
 PROVIDER_MISSING_OUTPUT_MESSAGE = "图片供应商没有返回图片结果，请稍后重试"
 PROVIDER_TEXT_OUTPUT_MESSAGE = "图片供应商已完成请求，但返回的是文字回复，没有返回图片结果"
+# 生图供应商 HTTP 连接超时：读写复用 image_generation_provider_timeout_seconds 预算
+IMAGE_PROVIDER_HTTP_CONNECT_TIMEOUT_SECONDS = 10.0
 
 logger = logging.getLogger(__name__)
+
+
+def image_provider_http_timeout(read_seconds: float | None = None) -> httpx.Timeout:
+    """生图供应商统一 HTTP 超时预算。
+
+    OpenAI SDK 默认 600s/调用且两个图片 provider 都没有传 timeout，任务最终只能靠
+    worker time_limit 兜底。这里统一收敛为：连接 10s，读/写/连接池共用
+    ``image_generation_provider_timeout_seconds`` 配置。
+    """
+
+    if read_seconds is None:
+        read_seconds = float(get_runtime_settings().image_generation_provider_timeout_seconds)
+    resolved = max(1.0, float(read_seconds))
+    return httpx.Timeout(
+        connect=IMAGE_PROVIDER_HTTP_CONNECT_TIMEOUT_SECONDS,
+        read=resolved,
+        write=resolved,
+        pool=resolved,
+    )
 
 
 @dataclass(slots=True)
@@ -219,6 +242,7 @@ class OpenAIResponsesImageClient:
         self.base_url = resolved_config.base_url
         self.model = resolved_config.model
         self.background_enabled = resolved_config.responses_background_enabled
+        self.provider_timeout_seconds = float(settings.image_generation_provider_timeout_seconds)
         self.tool_model = settings.image_tool_model
         self.tool_quality = settings.image_tool_quality
         self.tool_output_format = settings.image_tool_output_format
@@ -257,11 +281,17 @@ class OpenAIResponsesImageClient:
         if previous_response_id:
             request_payload["previous_response_id"] = previous_response_id
 
-        client_kwargs: dict[str, Any] = {"api_key": self.api_key}
+        client_kwargs: dict[str, Any] = {
+            "api_key": self.api_key,
+            "timeout": image_provider_http_timeout(self.provider_timeout_seconds),
+        }
         if self.base_url:
             client_kwargs["base_url"] = self.base_url
         fallback_used = False
         requested_tool = dict(tool)
+        # 整体 deadline：从发起请求（含回退重建）到后台轮询结束共用同一预算，
+        # 超时判失败并落明确 failure_reason，避免无限轮询只能靠 worker time_limit 兜底。
+        deadline = monotonic() + self.provider_timeout_seconds
         try:
             client = OpenAI(**client_kwargs)
         except Exception as exc:  # noqa: BLE001
@@ -288,6 +318,7 @@ class OpenAIResponsesImageClient:
                 request_payload=request_payload,
                 progress_callback=progress_callback,
                 task_context=task_context,
+                deadline=deadline,
             )
 
             output_call = self._extract_image_generation_call(response)
@@ -300,6 +331,7 @@ class OpenAIResponsesImageClient:
             if str(exc) in {
                 PROVIDER_REQUEST_FAILURE_MESSAGE,
                 PROVIDER_BACKGROUND_INCOMPLETE_MESSAGE,
+                PROVIDER_BACKGROUND_POLL_TIMEOUT_MESSAGE,
                 PROVIDER_MISSING_OUTPUT_MESSAGE,
                 PROVIDER_TEXT_OUTPUT_MESSAGE,
             }:
@@ -427,11 +459,21 @@ class OpenAIResponsesImageClient:
         request_payload: dict[str, Any],
         progress_callback: Callable[[dict[str, Any]], None] | None,
         task_context: dict[str, Any],
+        deadline: float | None = None,
     ) -> Any:
         self._emit_response_progress(response, progress_callback)
         response_id = str(_get_value(response, "id", "") or "")
         status = str(_get_value(response, "status", "") or "").lower()
         while response_id and status in RESPONSES_IN_PROGRESS_STATUSES and hasattr(client.responses, "retrieve"):
+            if deadline is not None and monotonic() >= deadline:
+                self._log_provider_failure(
+                    "Responses 图片供应商后台轮询超过整体 deadline",
+                    phase="poll_deadline_exceeded",
+                    request_payload=request_payload,
+                    response=response,
+                    task_context=task_context,
+                )
+                raise RuntimeError(PROVIDER_BACKGROUND_POLL_TIMEOUT_MESSAGE)
             sleep(RESPONSES_BACKGROUND_POLL_INTERVAL_SECONDS)
             try:
                 response = client.responses.retrieve(response_id)

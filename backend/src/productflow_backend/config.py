@@ -27,7 +27,13 @@ IMAGE_GENERATION_MAX_PIXELS = DEFAULT_IMAGE_GENERATION_MAX_DIMENSION * DEFAULT_I
 DEFAULT_IMAGE_SESSION_IDLE_TIMEOUT_MINUTES = 90
 IMAGE_SESSION_IDLE_TIMEOUT_MIN_MINUTES = 1
 IMAGE_SESSION_IDLE_TIMEOUT_MAX_MINUTES = 24 * 60
-DEFAULT_IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MINUTES = 24 * 60
+# Worker failsafe time_limit 兜底（dramatiq 会用 SIGKILL 杀超时 actor）：
+# 默认从 24h 下调为 1h。生图 provider 每次调用已由 image_generation_provider_timeout_seconds
+# （默认 300s）收敛，文/图生图单任务最多串行 10 张候选（约 10 x 300s），1h 足够；
+# 如单任务形态变化（如更长的商品流水线串行多图），用环境变量
+# IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MINUTES 调大。
+DEFAULT_IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MINUTES = 60
+DEFAULT_IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS = 300
 DEFAULT_WORKFLOW_IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS = 15 * 60
 IMAGE_SIZE_CONFIG_KEYS = {"image_main_image_size", "image_promo_poster_size"}
 PROMPT_CONFIG_KEYS = {
@@ -214,6 +220,12 @@ class Settings(BaseSettings):
     )
     workflow_image_generation_provider_timeout_seconds: int = Field(
         default=DEFAULT_WORKFLOW_IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS,
+        ge=1,
+        le=24 * 60 * 60,
+    )
+    # 文/图生图与 agent 生图路径的 provider 单次调用超时上界（工作流路径另有自己的包装超时）。
+    image_generation_provider_timeout_seconds: int = Field(
+        default=DEFAULT_IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS,
         ge=1,
         le=24 * 60 * 60,
     )

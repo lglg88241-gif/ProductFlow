@@ -2313,8 +2313,9 @@ def test_image_session_worker_actor_uses_internal_failsafe_time_limit(configured
         run_image_session_generation_task,
     )
 
-    assert get_image_session_worker_failsafe_time_limit_ms() == 24 * 60 * 60 * 1000
-    assert IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MS == 24 * 60 * 60 * 1000
+    # worker failsafe 默认从 24h 下调为 1h（生图 provider 单次调用已收敛到 300s 预算）
+    assert get_image_session_worker_failsafe_time_limit_ms() == 60 * 60 * 1000
+    assert IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MS == 60 * 60 * 1000
     assert run_image_session_generation_task.options["time_limit"] == IMAGE_SESSION_WORKER_FAILSAFE_TIME_LIMIT_MS
 
 

@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from helpers import (
@@ -1583,7 +1584,14 @@ def test_openai_images_provider_factory_and_client_generate_payload(
 
     result = OpenAIImagesClient().generate(prompt="生成商品图", size="1024x1024")[0]
 
-    assert client_kwargs == [{"api_key": "demo-api-key", "base_url": "https://example.test/v1"}]
+    # 生图链路统一超时预算：客户端必须携带 httpx.Timeout（连接 10s，读写用生图超时配置）
+    assert client_kwargs == [
+        {
+            "api_key": "demo-api-key",
+            "timeout": httpx.Timeout(connect=10.0, read=300.0, write=300.0, pool=300.0),
+            "base_url": "https://example.test/v1",
+        }
+    ]
     assert calls == [
         {
             "model": "gpt-image-1",

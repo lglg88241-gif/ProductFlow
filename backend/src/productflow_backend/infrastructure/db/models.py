@@ -644,6 +644,10 @@ class AgentMessage(Base):
     tool_call_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tool_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     image_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # token 用量（仅 assistant 消息由 LLM 响应回填；供应商未返回 usage 时保持 NULL）
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     agent_session: Mapped[AgentSession] = relationship(back_populates="messages")

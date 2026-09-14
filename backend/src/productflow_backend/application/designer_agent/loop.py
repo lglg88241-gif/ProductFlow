@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,6 +16,8 @@ from productflow_backend.application.designer_agent.prompts import AGENT_SYSTEM_
 from productflow_backend.application.designer_agent.tools import execute_tool, tool_schemas
 from productflow_backend.domain.errors import NotFoundError
 from productflow_backend.infrastructure.db.models import AgentMessage, AgentSession
+
+logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 8
 # 首轮模型只回文字未调工具时的督促重试（一次），强制"工具优先"
@@ -100,9 +104,35 @@ def _build_llm_messages(agent_session: AgentSession) -> list[dict[str, Any]]:
         if message.role == "assistant" and message.tool_calls_json:
             start = index
             break
+    # 孤儿 tool_calls 自愈：SSE 断线可能留下 assistant(tool_calls) 已落库、tool 结果未落库的
+    # 半截组，下一轮发给 OpenAI 兼容 API 会直接 400 且每轮复现。构建时校验配对：存在无配对
+    # 结果 call 的 assistant 组整组跳过（连带其残缺 tool 结果）；无状态过滤、不改库。
+    paired_tool_call_ids = {
+        message.tool_call_id for message in recent if message.role == "tool" and message.tool_call_id
+    }
+    skip_group = True  # 组前的孤立 tool 消息（截断产物）同样不放行
     for message in recent[start:]:
+        if message.role == "assistant" and message.tool_calls_json:
+            skip_group = any(
+                call.get("call_id", "") not in paired_tool_call_ids for call in message.tool_calls_json
+            )
+            if skip_group:
+                continue
+        elif message.role == "tool" and skip_group:
+            continue
         messages.append(_message_to_llm_format(message))
     return messages
+
+
+def _usage_columns(usage: dict[str, Any] | None) -> dict[str, Any]:
+    """把 LLM 响应的 usage 摘要映射为 AgentMessage 的 token 落库字段（无 usage 时不落）。"""
+    if not usage:
+        return {}
+    return {
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "total_tokens": usage.get("total_tokens"),
+    }
 
 
 def _persist_message(db: Session, agent_session: AgentSession, **kwargs: Any) -> AgentMessage:
@@ -159,6 +189,7 @@ def run_agent_turn(
                     {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
                     for call in response.tool_calls
                 ],
+                **_usage_columns(response.usage),
             )
             llm_messages.append(
                 {
@@ -178,7 +209,13 @@ def run_agent_turn(
                 }
             )
             for call in response.tool_calls:
+                tool_started = time.perf_counter()
                 result = execute_tool(db, agent_session, name=call.name, arguments=call.arguments, llm=client)
+                logger.info(
+                    "Agent 工具执行完成: tool=%s duration_ms=%.0f",
+                    call.name,
+                    (time.perf_counter() - tool_started) * 1000,
+                )
                 used_tools.append(call.name)
                 result_json = json.dumps(result, ensure_ascii=False)
                 _persist_message(
@@ -201,6 +238,7 @@ def run_agent_turn(
             agent_session,
             role="assistant",
             content=(response.content or "").strip() or "（我没想到要说什么，请再告诉我一点需求。）",
+            **_usage_columns(response.usage),
         )
         _advance_stage(db, agent_session, used_tools)
         db.expire_all()
@@ -319,6 +357,7 @@ def run_agent_turn_events(
                     {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
                     for call in response.tool_calls
                 ],
+                **_usage_columns(response.usage),
             )
             llm_messages.append(
                 {
@@ -339,7 +378,13 @@ def run_agent_turn_events(
             )
             for call in response.tool_calls:
                 yield {"event": "tool_start", "data": {"tool": call.name}}
+                tool_started = time.perf_counter()
                 result = execute_tool(db, agent_session, name=call.name, arguments=call.arguments, llm=client)
+                logger.info(
+                    "Agent 工具执行完成: tool=%s duration_ms=%.0f",
+                    call.name,
+                    (time.perf_counter() - tool_started) * 1000,
+                )
                 used_tools.append(call.name)
                 result_json = json.dumps(result, ensure_ascii=False)
                 _persist_message(
@@ -380,6 +425,7 @@ def run_agent_turn_events(
             agent_session,
             role="assistant",
             content=(response.content or "").strip() or "（我没想到要说什么，请再告诉我一点需求。）",
+            **_usage_columns(response.usage),
         )
         yield {
             "event": "message",

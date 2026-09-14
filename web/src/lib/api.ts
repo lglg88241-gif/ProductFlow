@@ -517,21 +517,27 @@ export const api = {
       while (boundary !== -1) {
         const block = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n"); // 立即重算，注释块 continue 时也不会死循环
         let event = "message";
         let data: Record<string, unknown> = {};
+        let hasFields = false;
         for (const line of block.split("\n")) {
-          if (line.startsWith("event: ")) event = line.slice(7);
-          else if (line.startsWith("data: ")) {
+          if (line.startsWith(":")) continue; // SSE 注释帧（如心跳 ": ping"），不是事件
+          if (line.startsWith("event: ")) {
+            event = line.slice(7);
+            hasFields = true;
+          } else if (line.startsWith("data: ")) {
             try {
               data = JSON.parse(line.slice(6)) as Record<string, unknown>;
             } catch {
               data = {};
             }
+            hasFields = true;
           }
         }
+        if (!hasFields) continue; // 纯注释块：整体跳过，不派发事件
         if (event === "done") doneFrame = data;
         onEvent(event, data);
-        boundary = buffer.indexOf("\n\n");
       }
     }
     return doneFrame;

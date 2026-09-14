@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 from openai import OpenAI
 
 from productflow_backend.infrastructure.provider_config import resolve_agent_provider_config
+
+logger = logging.getLogger(__name__)
+
+# 降级日志只输出错误摘要：限长并抹除疑似密钥片段，严防 API key 进入日志
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(?i)(?:sk-[A-Za-z0-9_.-]{6,}|api[-_]?key\s*[=:]\s*\S+|authorization[:\s]*bearer\s+\S+)"
+)
+_ERROR_SUMMARY_MAX_CHARS = 200
 
 
 class AgentLLMError(RuntimeError):
@@ -33,6 +42,40 @@ def _is_transient_llm_error(exc: Exception) -> bool:
     return any(code in message for code in (" 502", " 503 ", " 500 ", " 504"))
 
 
+def _summarize_error(exc: Exception, *, limit: int = _ERROR_SUMMARY_MAX_CHARS) -> str:
+    """生成可安全落日志的错误摘要：限长并抹除疑似密钥片段。"""
+    text = _SENSITIVE_KEY_PATTERN.sub("[已抹除]", f"{type(exc).__name__}: {exc}")
+    return text[:limit]
+
+
+def _parse_usage(usage: Any) -> dict[str, int] | None:
+    """从 OpenAI 兼容响应解析 token 用量；响应缺失 usage 或字段全空时返回 None。"""
+    if usage is None:
+        return None
+
+    def _get(key: str) -> int | None:
+        value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+        return int(value) if isinstance(value, int) else None
+
+    prompt_tokens = _get("prompt_tokens")
+    completion_tokens = _get("completion_tokens")
+    total_tokens = _get("total_tokens")
+    if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+        return None
+    if total_tokens is None:
+        total_tokens = (prompt_tokens or 0) + (completion_tokens or 0)
+    return {
+        "prompt_tokens": prompt_tokens or 0,
+        "completion_tokens": completion_tokens or 0,
+        "total_tokens": total_tokens,
+    }
+
+
+def _mark_served_by(client: AgentLLMClient, response: AgentLLMResponse) -> AgentLLMResponse:
+    """在响应上标记实际服务方（provider/模型），供降级链观测。"""
+    return replace(response, served_by=f"{client.provider_name}/{response.model or client.model}")
+
+
 @dataclass(frozen=True, slots=True)
 class AgentToolCall:
     call_id: str
@@ -45,6 +88,10 @@ class AgentLLMResponse:
     content: str | None
     tool_calls: list[AgentToolCall] = field(default_factory=list)
     model: str = ""
+    # token 用量（prompt_tokens/completion_tokens/total_tokens）；供应商未返回时为 None
+    usage: dict[str, int] | None = None
+    # 实际服务方（provider/model）；降级链由 FallbackAgentLLMClient 标注
+    served_by: str | None = None
 
 
 class AgentLLMClient(Protocol):
@@ -78,6 +125,7 @@ class OpenAICompatAgentClient:
         intent: str = "",
     ) -> AgentLLMResponse:
         _ = intent  # 工具内部调用的意图标记仅用于测试分流，生产实现忽略
+        started = time.perf_counter()
         response = None
         last_exc: Exception | None = None
         for attempt in range(AGENT_LLM_TRANSIENT_RETRIES + 1):
@@ -93,7 +141,7 @@ class OpenAICompatAgentClient:
                 last_exc = exc
                 if not _is_transient_llm_error(exc) or attempt >= AGENT_LLM_TRANSIENT_RETRIES:
                     raise AgentLLMError(f"设计师模型调用失败: {exc}") from exc
-                logging.getLogger(__name__).warning(
+                logger.warning(
                     "设计师模型瞬时故障，重试: attempt=%s error=%s", attempt + 1, type(exc).__name__
                 )
                 time.sleep(AGENT_LLM_RETRY_DELAY_SECONDS)
@@ -110,7 +158,18 @@ class OpenAICompatAgentClient:
             if not isinstance(arguments, dict):
                 arguments = {}
             tool_calls.append(AgentToolCall(call_id=call.id or "", name=function.name or "", arguments=arguments))
-        return AgentLLMResponse(content=choice.content, tool_calls=tool_calls, model=response.model or self.model)
+        logger.info(
+            "设计师模型调用完成: provider=%s model=%s duration_ms=%.0f",
+            self.provider_name,
+            response.model or self.model,
+            (time.perf_counter() - started) * 1000,
+        )
+        return AgentLLMResponse(
+            content=choice.content,
+            tool_calls=tool_calls,
+            model=response.model or self.model,
+            usage=_parse_usage(getattr(response, "usage", None)),
+        )
 
 
 class FallbackAgentLLMClient:
@@ -130,9 +189,17 @@ class FallbackAgentLLMClient:
         intent: str = "",
     ) -> AgentLLMResponse:
         try:
-            return self.primary.chat(messages=messages, tools=tools, intent=intent)
-        except AgentLLMError:
-            return self.fallback.chat(messages=messages, tools=tools, intent=intent)
+            response = self.primary.chat(messages=messages, tools=tools, intent=intent)
+        except AgentLLMError as exc:
+            # 降级切换必须可观测：记录主用失败原因摘要（已抹除疑似密钥），绝不静默
+            logger.warning(
+                "设计师模型主用供应商失败，已切换降级供应商: primary=%s reason=%s",
+                self.primary.provider_name,
+                _summarize_error(exc),
+            )
+            response = self.fallback.chat(messages=messages, tools=tools, intent=intent)
+            return _mark_served_by(self.fallback, response)
+        return _mark_served_by(self.primary, response)
 
 
 def build_agent_llm_client() -> AgentLLMClient:

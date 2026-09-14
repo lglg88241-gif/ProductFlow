@@ -21,6 +21,8 @@ from productflow_backend.infrastructure.logging import (
 from productflow_backend.infrastructure.provider_config import (
     ensure_provider_config_bootstrapped,
     provider_config_tables_available,
+    resolve_agent_provider_config,
+    resolve_image_provider_config,
 )
 from productflow_backend.infrastructure.queue import (
     recover_unfinished_image_session_generation_tasks,
@@ -33,6 +35,7 @@ from productflow_backend.presentation.routes.copy_inputs import router as copy_i
 from productflow_backend.presentation.routes.gallery import router as gallery_router
 from productflow_backend.presentation.routes.generation_queue import router as generation_queue_router
 from productflow_backend.presentation.routes.image_sessions import router as image_sessions_router
+from productflow_backend.presentation.routes.metrics import router as metrics_router
 from productflow_backend.presentation.routes.product_workflows import router as product_workflows_router
 from productflow_backend.presentation.routes.products import router as products_router
 from productflow_backend.presentation.routes.settings import router as settings_router
@@ -58,6 +61,11 @@ def create_app() -> FastAPI:
         except SQLAlchemyError:
             logging.getLogger(__name__).warning("内置素材库样板导入失败，跳过（下次启动重试）", exc_info=True)
         if not get_runtime_settings().admin_access_required:
+            # production 下管理员门禁被关闭属于致命配置错误：拒绝启动（fail-fast）
+            if get_settings().app_env.strip().lower() == "production":
+                raise RuntimeError(
+                    "production 环境必须开启管理员访问密钥（ADMIN_ACCESS_REQUIRED=true），已拒绝启动"
+                )
             logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
         if not get_settings().session_cookie_secure:
             logging.getLogger(__name__).warning(
@@ -95,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(copy_inputs_router)
     app.include_router(generation_queue_router)
     app.include_router(gallery_router)
+    app.include_router(metrics_router)
     app.include_router(products_router)
     app.include_router(product_workflows_router)
     app.include_router(image_sessions_router)
@@ -103,27 +112,15 @@ def create_app() -> FastAPI:
 
 
 def _provider_status_summary() -> dict[str, object]:
-    """当前生效的供应商摘要（不含任何密钥），便于运维确认配置与降级链。"""
-    from urllib.parse import urlparse
-
-    from productflow_backend.infrastructure.provider_config import (
-        resolve_agent_provider_config,
-        resolve_image_provider_config,
-    )
-
-    def _host(url: str | None) -> str | None:
-        return urlparse(url).netloc or None if url else None
-
+    """当前生效的供应商摘要（不含任何密钥，也不暴露 host/base_url 等部署拓扑信息）。"""
     summary: dict[str, object] = {}
     try:
         agent = resolve_agent_provider_config()
         summary["agent"] = {
             "kind": agent.provider_kind,
             "model": agent.model,
-            "host": _host(agent.base_url),
             "has_key": bool(agent.api_key),
-            "fallback_model": agent.fallback_model,
-            "fallback_host": _host(agent.fallback_base_url),
+            "has_fallback": bool(agent.fallback_api_key and agent.fallback_model),
         }
     except Exception as exc:  # noqa: BLE001 - 健康检查绝不因供应商配置问题失败
         summary["agent"] = {"error": type(exc).__name__}
@@ -132,7 +129,6 @@ def _provider_status_summary() -> dict[str, object]:
         summary["image"] = {
             "kind": image.provider_kind,
             "model": image.model,
-            "host": _host(image.base_url),
             "has_key": bool(image.api_key),
         }
     except Exception as exc:  # noqa: BLE001

@@ -88,13 +88,15 @@ services:
       UPLOAD_MAX_REFERENCE_IMAGES: ${UPLOAD_MAX_REFERENCE_IMAGES:-6}
       UPLOAD_MAX_PIXELS: ${UPLOAD_MAX_PIXELS:-16000000}
       UPLOAD_ALLOWED_IMAGE_MIME_TYPES: ${UPLOAD_ALLOWED_IMAGE_MIME_TYPES:-image/png,image/jpeg,image/webp}
+      IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS: ${IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS:-300}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
       JOB_RETRY_DELAY_MS: ${JOB_RETRY_DELAY_MS:-10000}
       GENERATION_MAX_CONCURRENT_TASKS: ${GENERATION_MAX_CONCURRENT_TASKS:-3}
     command: >-
       sh -c "alembic upgrade head && uvicorn productflow_backend.main:app --host 0.0.0.0 --port 29280"
     ports:
-      - "${APP_HOST_PORT:-29280}:29280"
+      # 只绑 loopback：公网入口走 web nginx 同源反代，避免后端直接暴露到 0.0.0.0
+      - "127.0.0.1:${APP_HOST_PORT:-29280}:29280"
     volumes:
       # STORAGE_HOST_PATH is host-only. Leave it unset to use the productflow-storage named volume,
       # or set it to an existing production directory such as /home/cot/ProductFlow-release/shared/storage.
@@ -124,6 +126,14 @@ services:
       ADMIN_ACCESS_KEY: ${ADMIN_ACCESS_KEY:?set ADMIN_ACCESS_KEY in .env}
       SETTINGS_ACCESS_TOKEN: ${SETTINGS_ACCESS_TOKEN:?set SETTINGS_ACCESS_TOKEN in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      # 设计师 Agent 供应商（与 backend 保持一致；worker 内 agent 生图/写文案需要）
+      AGENT_PROVIDER_KIND: ${AGENT_PROVIDER_KIND:-mock}
+      AGENT_API_KEY: ${AGENT_API_KEY:-}
+      AGENT_BASE_URL: ${AGENT_BASE_URL:-}
+      AGENT_MODEL: ${AGENT_MODEL:-grok-4.6}
+      AGENT_FALLBACK_API_KEY: ${AGENT_FALLBACK_API_KEY:-}
+      AGENT_FALLBACK_BASE_URL: ${AGENT_FALLBACK_BASE_URL:-}
+      AGENT_FALLBACK_MODEL: ${AGENT_FALLBACK_MODEL:-gemini-3.8-flash}
       DATABASE_URL: postgresql+psycopg://productflow:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@productflow-postgres:5432/productflow
       REDIS_URL: redis://productflow-redis:6379/0
       STORAGE_ROOT: /app/storage
@@ -141,7 +151,7 @@ services:
       IMAGE_PROVIDER_KIND: ${IMAGE_PROVIDER_KIND:-mock}
       IMAGE_API_KEY: ${IMAGE_API_KEY:-}
       IMAGE_BASE_URL: ${IMAGE_BASE_URL:-}
-      IMAGE_GENERATE_MODEL: ${IMAGE_GENERATE_MODEL:-gpt-5.4}
+      IMAGE_GENERATE_MODEL: ${IMAGE_GENERATE_MODEL:-gpt-image-2}
       IMAGE_RESPONSES_BACKGROUND_ENABLED: ${IMAGE_RESPONSES_BACKGROUND_ENABLED:-true}
       IMAGE_IMAGES_QUALITY: ${IMAGE_IMAGES_QUALITY:-}
       IMAGE_IMAGES_STYLE: ${IMAGE_IMAGES_STYLE:-}
@@ -153,6 +163,7 @@ services:
       UPLOAD_MAX_REFERENCE_IMAGES: ${UPLOAD_MAX_REFERENCE_IMAGES:-6}
       UPLOAD_MAX_PIXELS: ${UPLOAD_MAX_PIXELS:-16000000}
       UPLOAD_ALLOWED_IMAGE_MIME_TYPES: ${UPLOAD_ALLOWED_IMAGE_MIME_TYPES:-image/png,image/jpeg,image/webp}
+      IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS: ${IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS:-300}
       JOB_MAX_ATTEMPTS: ${JOB_MAX_ATTEMPTS:-3}
       JOB_RETRY_DELAY_MS: ${JOB_RETRY_DELAY_MS:-10000}
       GENERATION_MAX_CONCURRENT_TASKS: ${GENERATION_MAX_CONCURRENT_TASKS:-3}

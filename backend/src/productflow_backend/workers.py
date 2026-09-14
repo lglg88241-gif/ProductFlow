@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+import os
 import sys
+import threading
 from pathlib import Path
 
 import dramatiq
@@ -34,6 +37,11 @@ from productflow_backend.infrastructure.queue import (
 
 configure_logging()
 get_broker()
+
+logger = logging.getLogger(__name__)
+
+# 队列周期对账间隔（秒）：运行中 Redis 丢消息/滞留时由 DB（authoritative state）兜底补发
+DEFAULT_RECONCILE_INTERVAL_SECONDS = 1800
 
 
 def get_image_session_worker_failsafe_time_limit_ms() -> int:
@@ -89,7 +97,49 @@ def _running_under_dramatiq_cli() -> bool:
     return any(Path(arg).name == "dramatiq" for arg in sys.argv)
 
 
+def get_reconcile_interval_seconds() -> int:
+    """队列周期对账间隔（秒）：读环境变量 RECONCILE_INTERVAL_SECONDS，默认 1800，非法值回退默认。"""
+    raw = os.getenv("RECONCILE_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_RECONCILE_INTERVAL_SECONDS
+    try:
+        interval = int(raw)
+    except ValueError:
+        logger.warning("RECONCILE_INTERVAL_SECONDS 不是合法整数，使用默认值: %s", raw)
+        return DEFAULT_RECONCILE_INTERVAL_SECONDS
+    return interval if interval > 0 else DEFAULT_RECONCILE_INTERVAL_SECONDS
+
+
+def _reconcile_queue_once() -> None:
+    """对账一次：把运行中滞留/丢失的队列任务按 DB 补回队列。异常只记日志，不打断循环。"""
+    try:
+        recover_unfinished_workflow_runs(reset_stale_running=True)
+        recover_unfinished_image_session_generation_tasks(reset_stale_running=True)
+    except Exception:
+        logger.exception("队列周期对账失败")
+
+
+def run_queue_reconcile_loop(
+    interval_seconds: float | None = None,
+    *,
+    stop_event: threading.Event | None = None,
+) -> None:
+    """周期对账循环：先等一个间隔再对账（启动时已有一次性 recover），直到 stop_event 置位。"""
+    resolved_interval = interval_seconds if interval_seconds is not None else get_reconcile_interval_seconds()
+    stop = stop_event or threading.Event()
+    while not stop.wait(timeout=resolved_interval):
+        _reconcile_queue_once()
+
+
+def start_queue_reconcile_daemon() -> threading.Thread:
+    """worker 启动时开启队列周期对账 daemon 线程。"""
+    thread = threading.Thread(target=run_queue_reconcile_loop, name="queue-reconcile", daemon=True)
+    thread.start()
+    return thread
+
+
 if _running_under_dramatiq_cli():
     cleanup_old_logs()
     recover_unfinished_workflow_runs(reset_stale_running=True)
     recover_unfinished_image_session_generation_tasks(reset_stale_running=True)
+    start_queue_reconcile_daemon()

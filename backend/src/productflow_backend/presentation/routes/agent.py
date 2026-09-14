@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import queue
+import threading
 from collections.abc import Generator
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -35,6 +38,60 @@ from productflow_backend.presentation.schemas.agent import (
 )
 
 router = APIRouter(prefix="/api/agent", tags=["designer-agent"], dependencies=[Depends(require_admin)])
+
+logger = logging.getLogger(__name__)
+
+# SSE 心跳间隔（秒）：空闲超过该时长输出 ": ping" 注释帧，防止 nginx 默认 60s 空闲断开
+DEFAULT_SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+def _heartbeat_frames(
+    inner: Generator[str, None, None],
+    *,
+    heartbeat_interval: float = DEFAULT_SSE_HEARTBEAT_INTERVAL_SECONDS,
+) -> Generator[str, None, None]:
+    """给 SSE 帧生成器加心跳保活。
+
+    原事件生成器阻塞在 LLM/工具执行时无法自己发心跳。这里把帧生成放到后台线程消费，
+    推入队列；响应生成器带超时取帧，空闲超过 `heartbeat_interval` 秒则输出 SSE 注释帧
+    ": ping"（注释帧不是事件，客户端解析需跳过）。
+
+    客户端断开（GeneratorExit）时置停止标志并 join 后台线程：线程里的 turn 会继续执行
+    并落库完成，避免留下半截历史（孤儿 tool_calls）。
+    """
+    frame_queue: queue.Queue = queue.Queue()
+    sentinel = object()
+    client_gone = threading.Event()
+
+    def _pump() -> None:
+        try:
+            for frame in inner:
+                if client_gone.is_set():
+                    # 客户端已断开：不再排队剩余帧，但继续消费以让 turn 落库完成
+                    continue
+                frame_queue.put(frame)
+        except Exception:
+            logger.exception("SSE 事件生成器异常终止")
+        finally:
+            frame_queue.put(sentinel)
+
+    pump_thread = threading.Thread(target=_pump, name="sse-event-pump", daemon=True)
+    pump_thread.start()
+    try:
+        while True:
+            try:
+                frame = frame_queue.get(timeout=heartbeat_interval)
+            except queue.Empty:
+                yield ": ping\n\n"
+                continue
+            if frame is sentinel:
+                break
+            yield frame
+    except GeneratorExit:
+        client_gone.set()
+        # 等待后台线程把本轮 turn 执行完（继续落库），随后按协议重新抛出
+        pump_thread.join()
+        raise
 
 
 def _serialize_message(message) -> AgentMessageResponse:
@@ -264,7 +321,7 @@ def send_agent_message_stream_endpoint(
                                   "tool_events": [], "pending_generation_tasks": []})
 
     return StreamingResponse(
-        _generate(),
+        _heartbeat_frames(_generate(), heartbeat_interval=DEFAULT_SSE_HEARTBEAT_INTERVAL_SECONDS),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
