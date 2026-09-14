@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,6 +49,11 @@ OPTIONAL_FIELDS_FALLBACK_NOTE = {
 }
 IMAGES_API_MAX_N = 10
 IMAGES_API_TRANSIENT_RETRIES = 2
+# 中转站返回 200 但载荷为空（b64/url 都缺）时的整体重试
+EMPTY_OUTPUT_RETRIES = 2
+EMPTY_OUTPUT_RETRY_DELAY_SECONDS = 2.0
+# 下载中转站图片 URL 的重试
+REMOTE_IMAGE_DOWNLOAD_RETRIES = 2
 _OPTIONAL_IMAGE_FIELDS = frozenset(
     {
         "quality",
@@ -109,15 +115,20 @@ class ImagesReferenceImage:
 
 
 def _download_remote_image(url: str, *, timeout: float = 120.0) -> bytes | None:
-    """下载中转站返回的图片 URL；失败返回 None 由上层统一报错。"""
-    try:
-        response = httpx.get(url, timeout=timeout, follow_redirects=True)
-        response.raise_for_status()
-        content = response.content
-    except httpx.HTTPError:
-        logging.getLogger(__name__).warning("下载中转站图片 URL 失败: %s", url[:200])
-        return None
-    return content or None
+    """下载中转站返回的图片 URL（含重试，临时链接可能尚未就绪）；失败返回 None。"""
+    for attempt in range(REMOTE_IMAGE_DOWNLOAD_RETRIES + 1):
+        try:
+            response = httpx.get(url, timeout=timeout, follow_redirects=True)
+            response.raise_for_status()
+            content = response.content
+            if content:
+                return content
+            logger.warning("中转站图片 URL 返回空内容: attempt=%s url=%s", attempt + 1, url[:160])
+        except httpx.HTTPError as exc:
+            logger.warning("下载中转站图片 URL 失败: attempt=%s error=%s", attempt + 1, type(exc).__name__)
+        if attempt < REMOTE_IMAGE_DOWNLOAD_RETRIES:
+            time.sleep(EMPTY_OUTPUT_RETRY_DELAY_SECONDS)
+    return None
 
 
 def _mime_type_from_image_bytes(data: bytes) -> str:
@@ -366,6 +377,29 @@ class OpenAIImagesClient:
                     except (OSError, ValueError):
                         continue
 
+    def _parse_with_empty_output_retry(
+        self,
+        *,
+        operation: Any,
+        request_params: dict[str, Any],
+        parse_kwargs: dict[str, Any],
+        initial_response: Any = None,
+    ) -> list[ImagesAPIResult]:
+        """中转站常见故障：HTTP 200 但载荷为空。整体重试（含重新发起请求）。"""
+        response = initial_response
+        for attempt in range(EMPTY_OUTPUT_RETRIES):
+            if response is None:
+                response = self._call_with_transient_retries(operation, request_params)
+            try:
+                return self._parse_response(response, **parse_kwargs)
+            except RuntimeError as exc:
+                if PROVIDER_MISSING_OUTPUT_MESSAGE not in str(exc) or attempt >= EMPTY_OUTPUT_RETRIES - 1:
+                    raise
+                logger.warning("图片供应商返回空载荷，整体重试: attempt=%s", attempt + 1)
+                time.sleep(EMPTY_OUTPUT_RETRY_DELAY_SECONDS)
+                response = None
+        raise AssertionError("unreachable empty-output retry state")
+
     def generate(
         self,
         *,
@@ -428,12 +462,16 @@ class OpenAIImagesClient:
             None,
             notes=[OPTIONAL_FIELDS_FALLBACK_NOTE] if fallback_used else [],
         )
-        return self._parse_response(
-            response,
-            model=req_model,
-            size=size,
-            provider_request_json=self._sanitize_generate_request_params(request_params),
-            provider_output_json=provider_output_json,
+        return self._parse_with_empty_output_retry(
+            operation=client.images.generate,
+            request_params=request_params,
+            initial_response=response,
+            parse_kwargs=dict(
+                model=req_model,
+                size=size,
+                provider_request_json=self._sanitize_generate_request_params(request_params),
+                provider_output_json=provider_output_json,
+            ),
         )
 
     def edit(

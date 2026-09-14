@@ -67,6 +67,10 @@ All notable changes for ProductFlow are recorded here.
 
 ### Fixed
 
+- **Relay resilience (P1)**: image provider retries empty payloads (HTTP 200 with
+  neither `b64_json` nor `url`) and retries remote image downloads; the designer
+  agent retries transient gateway failures (5xx / connection errors) once before
+  failing over, while 4xx input errors and timeouts are never retried.
 - Image provider now accepts relay stations that return image URLs instead of
   `b64_json` (downloads the remote image transparently).
 - Thumbnail variant generation silently falling back to originals on Windows when long asset stems pushed temp-file paths past MAX_PATH.

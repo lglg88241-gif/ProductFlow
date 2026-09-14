@@ -84,7 +84,11 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     def healthcheck() -> dict[str, object]:
-        return {"status": "ok", "admin_access_required": get_runtime_settings().admin_access_required}
+        return {
+            "status": "ok",
+            "admin_access_required": get_runtime_settings().admin_access_required,
+            "providers": _provider_status_summary(),
+        }
 
     app.include_router(agent_router)
     app.include_router(auth_router)
@@ -96,6 +100,44 @@ def create_app() -> FastAPI:
     app.include_router(image_sessions_router)
     app.include_router(settings_router)
     return app
+
+
+def _provider_status_summary() -> dict[str, object]:
+    """当前生效的供应商摘要（不含任何密钥），便于运维确认配置与降级链。"""
+    from urllib.parse import urlparse
+
+    from productflow_backend.infrastructure.provider_config import (
+        resolve_agent_provider_config,
+        resolve_image_provider_config,
+    )
+
+    def _host(url: str | None) -> str | None:
+        return urlparse(url).netloc or None if url else None
+
+    summary: dict[str, object] = {}
+    try:
+        agent = resolve_agent_provider_config()
+        summary["agent"] = {
+            "kind": agent.provider_kind,
+            "model": agent.model,
+            "host": _host(agent.base_url),
+            "has_key": bool(agent.api_key),
+            "fallback_model": agent.fallback_model,
+            "fallback_host": _host(agent.fallback_base_url),
+        }
+    except Exception as exc:  # noqa: BLE001 - 健康检查绝不因供应商配置问题失败
+        summary["agent"] = {"error": type(exc).__name__}
+    try:
+        image = resolve_image_provider_config()
+        summary["image"] = {
+            "kind": image.provider_kind,
+            "model": image.model,
+            "host": _host(image.base_url),
+            "has_key": bool(image.api_key),
+        }
+    except Exception as exc:  # noqa: BLE001
+        summary["image"] = {"error": type(exc).__name__}
+    return summary
 
 
 class RequestIdMiddleware:

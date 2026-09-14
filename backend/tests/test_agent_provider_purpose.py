@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -298,3 +299,15 @@ def test_image_env_variables_take_precedence_over_ui_binding(
     assert resolved_after.provider_profile_id is None
 
 
+
+
+def test_healthz_reports_provider_summary_without_secrets(configured_env: Path) -> None:
+    """healthz 暴露供应商摘要（kind/model/host），绝不泄露密钥。"""
+    from productflow_backend.presentation.api import create_app
+
+    client = TestClient(create_app())
+    payload = client.get("/healthz").json()
+    providers = payload["providers"]
+    assert set(providers) == {"agent", "image"}
+    assert "api_key" not in json.dumps(providers)
+    assert providers["agent"]["kind"] in {"mock", "openai"}

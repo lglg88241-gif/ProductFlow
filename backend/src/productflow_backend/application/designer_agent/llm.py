@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -11,6 +13,24 @@ from productflow_backend.infrastructure.provider_config import resolve_agent_pro
 
 class AgentLLMError(RuntimeError):
     """Agent 底层 LLM 调用失败（网络/供应商错误）。"""
+
+
+# 中转站常见的瞬时故障（网关 5xx / 连接类）重试一次；超时不重试，避免等待翻倍
+AGENT_LLM_TRANSIENT_RETRIES = 1
+AGENT_LLM_RETRY_DELAY_SECONDS = 2.0
+_TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 520, 521, 522, 523, 524}
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    """仅网络类/网关类瞬时故障可重试；超时（等待成本高）与 4xx 输入错误不重试。"""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status in _TRANSIENT_STATUS_CODES:
+        return True
+    name = type(exc).__name__
+    if name in {"APIConnectionError", "APITimeoutError"}:
+        return name != "APITimeoutError"
+    message = str(exc)
+    return any(code in message for code in (" 502", " 503 ", " 500 ", " 504"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,15 +78,27 @@ class OpenAICompatAgentClient:
         intent: str = "",
     ) -> AgentLLMResponse:
         _ = intent  # 工具内部调用的意图标记仅用于测试分流，生产实现忽略
-        try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,  # type: ignore[arg-type]
-                tools=tools or None,  # type: ignore[arg-type]
-                temperature=0.4,
-            )
-        except Exception as exc:  # noqa: BLE001 - 供应商异常统一转译为 AgentLLMError
-            raise AgentLLMError(f"设计师模型调用失败: {exc}") from exc
+        response = None
+        last_exc: Exception | None = None
+        for attempt in range(AGENT_LLM_TRANSIENT_RETRIES + 1):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,  # type: ignore[arg-type]
+                    tools=tools or None,  # type: ignore[arg-type]
+                    temperature=0.4,
+                )
+                break
+            except Exception as exc:  # noqa: BLE001 - 供应商异常统一转译为 AgentLLMError
+                last_exc = exc
+                if not _is_transient_llm_error(exc) or attempt >= AGENT_LLM_TRANSIENT_RETRIES:
+                    raise AgentLLMError(f"设计师模型调用失败: {exc}") from exc
+                logging.getLogger(__name__).warning(
+                    "设计师模型瞬时故障，重试: attempt=%s error=%s", attempt + 1, type(exc).__name__
+                )
+                time.sleep(AGENT_LLM_RETRY_DELAY_SECONDS)
+        if response is None:
+            raise AgentLLMError(f"设计师模型调用失败: {last_exc}") from last_exc
         choice = response.choices[0].message
         tool_calls: list[AgentToolCall] = []
         for call in choice.tool_calls or []:

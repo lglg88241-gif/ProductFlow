@@ -339,3 +339,47 @@ def test_agent_nudge_skipped_when_tools_already_used(configured_env: Path, insta
         assert len(llm.calls) == 2  # 未触发督促重试
     finally:
         db.close()
+
+
+def test_agent_llm_retries_transient_gateway_errors() -> None:
+    """中转网关瞬时 5xx 重试一次；4xx 与超时不重试。"""
+    from productflow_backend.application.designer_agent.llm import AgentLLMError, OpenAICompatAgentClient
+
+    class _GatewayError(Exception):
+        status_code = 502
+
+    class _InputError(Exception):
+        status_code = 400
+
+    class _FlakyCompletions:
+        def __init__(self, failures: int, error: Exception) -> None:
+            self.failures = failures
+            self.error = error
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise self.error
+            message = type("M", (), {"content": "ok", "tool_calls": None})()
+            return type("R", (), {"choices": [type("C", (), {"message": message})()], "model": "m"})()
+
+    class _Client:
+        def __init__(self, completions) -> None:
+            self.chat = type("Chat", (), {"completions": completions})()
+
+    client = OpenAICompatAgentClient(provider_name="t", api_key="k", base_url="http://x", model="m")
+
+    flaky = _FlakyCompletions(failures=1, error=_GatewayError("502 bad gateway"))
+    client._client = _Client(flaky)  # type: ignore[assignment]
+    response = client.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert response.content == "ok"
+    assert flaky.calls == 2, "瞬时 5xx 应重试一次"
+
+    bad_input = _FlakyCompletions(failures=1, error=_InputError("bad request"))
+    client._client = _Client(bad_input)  # type: ignore[assignment]
+    import pytest as _pytest
+
+    with _pytest.raises(AgentLLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert bad_input.calls == 1, "4xx 不应重试"
