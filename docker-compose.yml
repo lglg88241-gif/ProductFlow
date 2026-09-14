@@ -38,6 +38,7 @@ services:
       dockerfile: backend/Dockerfile
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+    image: productflow-backend:local
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-production}
@@ -115,9 +116,8 @@ services:
       start_period: 20s
 
   productflow-worker:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
+    # 与 backend 共用同一镜像（仅启动命令不同），杜绝双倍构建和陈旧镜像
+    image: productflow-backend:local
     restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-production}

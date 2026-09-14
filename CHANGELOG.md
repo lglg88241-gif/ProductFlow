@@ -6,6 +6,12 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Env-first provider configuration**: `.env` is now the authoritative source for
+  self-provided APIs — precedence is `.env` (`AGENT_*` / `IMAGE_*`) > UI bindings > mock.
+  Relay-friendly: no capability gates, same-profile fallback allowed, defaults
+  `grok-4.6` + `gemini-3.8-flash` fallback and `gpt-image-2` image model.
+- **Login gate toggle**: `ADMIN_ACCESS_REQUIRED=false` in `.env` disables the login
+  gate entirely (internal-tool mode); default stays secure.
 - **Provider purpose classification**: new `agent` provider binding purpose, independent
   from text (copy) and image (gpt-image-2) bindings. Agent bindings target
   OpenAI-compatible chat providers (e.g. xAI grok-4.6) with an optional fallback
@@ -53,6 +59,8 @@ All notable changes for ProductFlow are recorded here.
 
 ### Fixed
 
+- Image provider now accepts relay stations that return image URLs instead of
+  `b64_json` (downloads the remote image transparently).
 - Thumbnail variant generation silently falling back to originals on Windows when long asset stems pushed temp-file paths past MAX_PATH.
 
 ## 0.1.0 - 2026-05-02
