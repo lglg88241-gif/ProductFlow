@@ -15,6 +15,8 @@ import type {
   AgentSessionDetail,
   AgentToolEvent,
 } from "../lib/agentTypes";
+import { useCandidatePolls } from "../lib/candidatePolling";
+import type { CandidatePollState } from "../lib/candidatePolling";
 import { useI18n } from "../lib/preferences";
 import type { ImageSessionRound } from "../lib/types";
 
@@ -203,10 +205,12 @@ function GridExportCard({ event }: { event: AgentToolEvent }) {
 
 function ToolEventCard({
   event,
+  poll,
   onPick,
   onContinue,
 }: {
   event: AgentToolEvent;
+  poll?: CandidatePollState;
   onPick: (message: string) => void;
   onContinue: (message: string) => void;
 }) {
@@ -214,7 +218,7 @@ function ToolEventCard({
   if (event.tool === "generate_image") {
     // 候选多于 1 张、或异步生成中暂无候选时用候选对比卡；恰好 1 张保持原渲染
     if (shouldRenderMultiCandidates(event.result)) {
-      return <MultiCandidateCard event={event} onContinue={onContinue} />;
+      return <MultiCandidateCard event={event} poll={poll} onContinue={onContinue} />;
     }
     return <GeneratedImages event={event} />;
   }
@@ -269,6 +273,9 @@ export function WorkbenchPage() {
   const [streamMessages, setStreamMessages] = useState<AgentMessage[]>([]);
   const [streamToolEvents, setStreamToolEvents] = useState<AgentToolEvent[]>([]);
   const [streamError, setStreamError] = useState<string | null>(null);
+
+  // pending 候选卡的有界轮询：仅在流式会话进行中轮询，按 image_session_id 去重共享结果
+  const candidatePolls = useCandidatePolls(streaming ? streamToolEvents : []);
 
   const resetStreamState = () => {
     setStreamStage(null);
@@ -456,6 +463,11 @@ export function WorkbenchPage() {
                   <ToolEventCard
                     key={`stream-event-${index}`}
                     event={event}
+                    poll={
+                      event.result.image_session_id
+                        ? candidatePolls[event.result.image_session_id]
+                        : undefined
+                    }
                     onPick={(message: string) => void sendAgentMessage(message)}
                     onContinue={(message: string) => {
                       setDraft(message);

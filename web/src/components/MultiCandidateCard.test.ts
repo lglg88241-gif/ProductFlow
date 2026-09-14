@@ -66,3 +66,70 @@ describe("MultiCandidateCard 渲染内容", () => {
     expect(candidatesFromResult({})).toEqual([]);
   });
 });
+
+describe("MultiCandidateCard 轮询态", () => {
+  const polledCandidates = [
+    {
+      asset_id: "asset-1",
+      url: "/api/image-session-assets/asset-1/download",
+      preview_url: "/api/image-session-assets/asset-1/download?variant=preview",
+      label: "候选 1",
+    },
+    {
+      asset_id: "asset-2",
+      url: "/api/image-session-assets/asset-2/download",
+      preview_url: "/api/image-session-assets/asset-2/download?variant=preview",
+      label: "候选 2",
+    },
+  ];
+
+  function renderWithPoll(result: AgentToolEvent["result"], poll?: { candidates: typeof polledCandidates; elapsedSeconds: number; expired: boolean }) {
+    return renderToStaticMarkup(
+      createElement(MultiCandidateCard, {
+        event: toolEvent(result),
+        onContinue: () => undefined,
+        poll,
+      }),
+    );
+  }
+
+  it("pending 轮询中显示等待秒数的动态文案", () => {
+    const html = renderWithPoll(
+      { candidates: [], pending: true, expected_candidates: 2, image_session_id: "s1" },
+      { candidates: [], elapsedSeconds: 9, expired: false },
+    );
+    expect(html).toContain(translate("zh-CN", "workbench.candidate.pendingWaiting", { count: 2, seconds: 9 }));
+    expect(html).not.toContain(translate("zh-CN", "workbench.candidate.pending", { count: 2 }));
+  });
+
+  it("轮询超限后显示兜底文案并停止等待提示", () => {
+    const html = renderWithPoll(
+      { candidates: [], pending: true, expected_candidates: 3, image_session_id: "s1" },
+      { candidates: [], elapsedSeconds: 120, expired: true },
+    );
+    expect(html).toContain(translate("zh-CN", "workbench.candidate.pendingTimeout"));
+    expect(html).not.toContain(translate("zh-CN", "workbench.candidate.pendingWaiting", { count: 3, seconds: 120 }));
+  });
+
+  it("轮询到候选后渲染候选卡：预览图、下载与用这张继续", () => {
+    const html = renderWithPoll(
+      { candidates: [], pending: true, expected_candidates: 2, image_session_id: "s1" },
+      { candidates: polledCandidates, elapsedSeconds: 12, expired: false },
+    );
+    expect(html).toContain('src="/api/image-session-assets/asset-1/download?variant=preview"');
+    expect(html).toContain('href="/api/image-session-assets/asset-1/download"');
+    expect(html).toContain("候选 1");
+    expect(html).toContain("候选 2");
+    expect(html).toContain("下载");
+    expect(html).toContain(translate("zh-CN", "workbench.candidate.useThis"));
+  });
+
+  it("result 自带候选时优先于轮询候选", () => {
+    const html = renderWithPoll(
+      { candidates: [candidate("9")], pending: true, image_session_id: "s1" },
+      { candidates: polledCandidates, elapsedSeconds: 12, expired: false },
+    );
+    expect(html).toContain('src="https://cdn.example.com/9.png"');
+    expect(html).not.toContain('src="/api/image-session-assets/asset-1/download?variant=preview"');
+  });
+});
