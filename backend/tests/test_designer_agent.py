@@ -70,6 +70,7 @@ def test_agent_turn_writes_copy_through_tool_script(configured_env: Path, instal
 
 def test_agent_turn_generates_image_and_links_session(configured_env: Path, install_scripted_llm) -> None:
     from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
+    from productflow_backend.infrastructure.db.models import ImageSessionGenerationTask
     from productflow_backend.infrastructure.db.session import get_session_factory
 
     script = [
@@ -98,16 +99,78 @@ def test_agent_turn_generates_image_and_links_session(configured_env: Path, inst
         assert tool_result["status"] == "completed", tool_result
         # 尺寸按生成约束归一到 16 的倍数
         assert tool_result["size"] == "1072x1440"
-        assert len(tool_result["completed_assets"]) == 1
+        # 默认一次生成 2 张候选供挑选
+        assert tool_result["expected_candidates"] == 2
+        assert len(tool_result["completed_assets"]) == 2
+        assert "pending" not in tool_result
+
+        candidates = tool_result["candidates"]
+        assert [item["label"] for item in candidates] == ["候选 1", "候选 2"]
+        assert all(item["url"].startswith("/api/image-session-assets/") for item in candidates)
+        assert tool_result["primary_url"] == candidates[0]["url"]
 
         assert agent_session.stage == "review"
         assert agent_session.image_session_id is not None
         assert result.pending_generation_tasks == []
 
-        download_url = tool_result["completed_assets"][0]["download_url"]
-        assert download_url.startswith("/api/image-session-assets/")
+        task = db.query(ImageSessionGenerationTask).filter_by(session_id=agent_session.image_session_id).one()
+        assert task.generation_count == 2
+        assert task.status == "succeeded"
+        assert task.result_generation_group_id
     finally:
         db.close()
+
+
+def test_generate_image_count_argument_is_passed_through(configured_env: Path, install_scripted_llm) -> None:
+    """count 透传为会话生成任务的 generation_count，并决定候选数量。"""
+    from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
+    from productflow_backend.infrastructure.db.models import ImageSessionGenerationTask
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    install_scripted_llm(
+        [
+            AgentLLMResponse(
+                content=None,
+                tool_calls=[
+                    AgentToolCall(
+                        call_id="call-image-count",
+                        name="generate_image",
+                        arguments={"prompt": "三张方向不同的开业海报，粉色系", "count": 3},
+                    )
+                ],
+            ),
+            AgentLLMResponse(content="三个方向都出好了，挑一张我继续细化。"),
+        ]
+    )
+    db = get_session_factory()()
+    try:
+        agent_session = create_agent_session(db)
+        result = run_agent_turn(db, agent_session_id=agent_session.id, user_content="给我三个方向挑挑")
+
+        tool_result = json.loads(result.messages[2].content)
+        assert tool_result["status"] == "completed", tool_result
+        assert tool_result["expected_candidates"] == 3
+
+        task = db.query(ImageSessionGenerationTask).filter_by(session_id=agent_session.image_session_id).one()
+        assert task.generation_count == 3
+        assert task.completed_candidates == 3
+
+        candidates = tool_result["candidates"]
+        assert len(candidates) == 3
+        assert [item["label"] for item in candidates] == ["候选 1", "候选 2", "候选 3"]
+        assert tool_result["primary_url"] == candidates[0]["url"]
+    finally:
+        db.close()
+
+
+def test_generate_image_count_out_of_range_is_clamped(configured_env: Path, install_scripted_llm) -> None:
+    """count 超界收敛到 1~4；非整数回落默认 2。"""
+    from productflow_backend.application.designer_agent.tools import _normalize_generation_count
+
+    assert _normalize_generation_count(0) == 1
+    assert _normalize_generation_count(99) == 4
+    assert _normalize_generation_count("不是数字") == 2
+    assert _normalize_generation_count(None) == 2
 
 
 def test_agent_tool_failure_is_translated_for_the_user(configured_env: Path, install_scripted_llm) -> None:

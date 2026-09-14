@@ -22,6 +22,19 @@ from productflow_backend.config import normalize_image_generation_size
 from productflow_backend.infrastructure.db.models import AgentSession
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
+# 单轮多候选：一次生成几张供用户挑选（1~4 张，默认 2）
+DEFAULT_GENERATION_COUNT = 2
+GENERATION_COUNT_MIN = 1
+GENERATION_COUNT_MAX = 4
+
+
+def _normalize_generation_count(value: Any) -> int:
+    """把 LLM 传入的 count 收敛到 1~4 的合法区间。"""
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_GENERATION_COUNT
+    return min(max(count, GENERATION_COUNT_MIN), GENERATION_COUNT_MAX)
 
 
 def tool_schemas() -> list[dict[str, Any]]:
@@ -31,7 +44,9 @@ def tool_schemas() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "generate_image",
-                "description": "根据图片描述生成一张新图。异步任务，调用后告知用户正在生成。",
+                "description": (
+                    "根据图片描述生成新图（默认一次 2 张候选供用户挑选）。异步任务，调用后告知用户正在生成。"
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -39,9 +54,9 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": "具体的图片描述：主体、构图、色调、光线、文字位内容",
                         },
-                        "size": {
-                            "type": "string",
-                            "description": "宽x高像素，如 1024x1024 方图、1080x1440 朋友圈海报；缺省 1024x1024",
+                        "count": {
+                            "type": "integer",
+                            "description": "一次生成几张候选供挑选（1-4 张，默认 2）",
                         },
                         "template_asset_id": {
                             "type": "string",
@@ -241,6 +256,35 @@ def tool_schemas() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "rerender_poster_copy",
+                "description": (
+                    "商品海报只改文字（价格/标题/卖点/行动号召）时使用：基于商品现有输入本地秒级重渲一张新海报，"
+                    "不消耗生图额度。要改画面/风格请改用 edit_image 或 generate_image。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product_id": {"type": "string", "description": "商品 id"},
+                        "poster_kind": {
+                            "type": "string",
+                            "enum": ["main_image", "promo_poster"],
+                            "description": "海报类型：main_image=电商主图，promo_poster=促销海报",
+                        },
+                        "copy": {
+                            "type": "object",
+                            "description": (
+                                "要覆盖的文字字段（部分覆盖即可）：price=价格、product_name=商品名、"
+                                "headline=主标题、selling_points=卖点数组、instruction=行动号召/卖点引导"
+                            ),
+                        },
+                    },
+                    "required": ["product_id", "poster_kind", "copy"],
+                },
+            },
+        },
     ]
 
 
@@ -318,6 +362,7 @@ def execute_tool(
                 size=arguments.get("size"),
                 base_asset_id=None,
                 template_asset_id=str(arguments.get("template_asset_id", "")) or None,
+                generation_count=_normalize_generation_count(arguments.get("count")),
             )
         if name == "edit_image":
             return _run_generation(
@@ -387,7 +432,9 @@ def execute_tool(
         if name == "recommend_designs":
             return _run_recommend_designs(db, llm, arguments)
         if name == "write_copy_report":
-            return _run_write_copy_report(llm, arguments)
+            return _run_write_copy_report(db, agent_session, llm, arguments)
+        if name == "rerender_poster_copy":
+            return _run_rerender_poster_copy(db, arguments)
         return {"status": "error", "message": f"未知工具: {name}"}
     except Exception as exc:  # noqa: BLE001 - 面向用户的工具错误必须转译
         return {"status": "error", "message": _friendly_generation_error(exc), "detail": str(exc)[:200]}
@@ -414,6 +461,42 @@ def _template_style_block(entry: Any) -> str:
     return "严格按照以下模板风格出图（复用其版式语言，不要照抄其中文字与品牌标识）：" + "；".join(parts)
 
 
+def _latest_generation_task(detail: Any):
+    """会话里最新一次提交的生成任务（relationship 按 created_at 升序）。"""
+    tasks = list(getattr(detail, "generation_tasks", []) or [])
+    return tasks[-1] if tasks else None
+
+
+def _generation_candidates(detail: Any) -> tuple[list[dict[str, Any]], bool]:
+    """提取本轮（最新一次生成任务）的候选与就绪状态。
+
+    返回 (candidates, pending)：
+    - 内联完成（测试/同步路径）：候选按 candidate_index 排序返回；
+    - durable 队列异步提交（生产路径）：任务还在排队/执行时返回空候选 + pending=True，
+      部分候选就绪时返回已有候选并保留 pending=True。
+    """
+    latest_task = _latest_generation_task(detail)
+    if latest_task is None:
+        return [], False
+    group_id = latest_task.result_generation_group_id
+    group_rounds = [
+        round_item
+        for round_item in (getattr(detail, "rounds", []) or [])
+        if group_id and round_item.generation_group_id == group_id and round_item.generated_asset is not None
+    ]
+    group_rounds.sort(key=lambda item: (item.candidate_index, item.created_at, item.id))
+    candidates = [
+        {
+            "asset_id": round_item.generated_asset.id,
+            "url": f"/api/image-session-assets/{round_item.generated_asset.id}/download",
+            "label": f"候选 {round_item.candidate_index}",
+        }
+        for round_item in group_rounds
+    ]
+    pending = latest_task.status in {"queued", "running"}
+    return candidates, pending
+
+
 def _run_generation(
     db: Session,
     agent_session: AgentSession,
@@ -422,6 +505,7 @@ def _run_generation(
     size: Any,
     base_asset_id: str | None,
     template_asset_id: str | None = None,
+    generation_count: int = 1,
 ) -> dict[str, Any]:
     if not prompt.strip():
         return {"status": "error", "message": "图片描述为空，需要先明确画什么。"}
@@ -442,11 +526,18 @@ def _run_generation(
         prompt=effective_prompt,
         size=resolved_size,
         base_asset_id=base_asset_id,
-        generation_count=1,
+        generation_count=generation_count,
     )
     summary = _generation_summary(detail)
     summary["prompt"] = effective_prompt
     summary["size"] = resolved_size
+    summary["expected_candidates"] = generation_count
+    candidates, pending = _generation_candidates(detail)
+    summary["candidates"] = candidates
+    if pending:
+        summary["pending"] = True
+    if candidates:
+        summary["primary_url"] = candidates[0]["url"]
     if template_title:
         summary["template_title"] = template_title
     return summary
@@ -485,11 +576,9 @@ _RECOMMEND_RATIONALE_PROMPT = """你是资深设计师。针对用户需求，�
 
 _COPY_REPORT_PROMPT = """你是资深营销文案师。根据需求输出一份完整的文案报告，只返回 JSON 对象：
 {{
-  "headline": "主标题",
-  "moments_caption": "朋友圈正文（2-4 行，口语化，有行动号召）",
-  "selling_points": ["卖点1", "卖点2", "卖点3"],
-  "hashtags": ["话题标签"],
-  "publishing_tips": "发布建议（时间/配图张数/互动引导）"
+  "title": "报告标题（如：XX 开业朋友圈文案报告）",
+  "content": "markdown 正文，依次包含：## 朋友圈正文（2-4 行，口语化，有行动号召）、\
+## 卖点清单（3 条左右）、## 话题标签、## 发布建议（时间/配图张数/互动引导）"
 }}
 不要包含其他文字或代码块标记。
 需求：{brief}
@@ -699,7 +788,65 @@ def _run_recommend_designs(db: Session, llm: AgentLLMClient, arguments: dict[str
     }
 
 
-def _run_write_copy_report(llm: AgentLLMClient, arguments: dict[str, Any]) -> dict[str, Any]:
+def _strip_code_fence(text: str) -> str:
+    """剥掉 LLM 输出常用的 ```json ... ``` 代码围栏（无围栏时原样返回）。"""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        inner = cleaned.split("```")[1] if "```" in cleaned[3:] else cleaned[3:]
+        cleaned = inner.removeprefix("json").removeprefix("JSON").strip()
+    return cleaned
+
+
+def _sections_to_markdown(sections: Any) -> str:
+    """把 sections（数组或对象）拼成 markdown 正文，兼容多种键名。"""
+    parts: list[str] = []
+    if isinstance(sections, dict):
+        for key, value in sections.items():
+            body = str(value).strip()
+            if body:
+                parts.append(f"## {key}\n{body}")
+    elif isinstance(sections, list):
+        for item in sections:
+            if isinstance(item, dict):
+                heading = str(item.get("heading") or item.get("title") or "").strip()
+                body = str(item.get("body") or item.get("content") or item.get("text") or "").strip()
+                parts.append(f"## {heading}\n{body}" if heading else body)
+            elif isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+    return "\n\n".join(part for part in parts if part.strip())
+
+
+def _legacy_report_fields_to_markdown(report: dict[str, Any]) -> str:
+    """兼容旧版字段形状（headline/moments_caption/...），拼成 markdown。"""
+    parts: list[str] = []
+    mapping = (
+        ("moments_caption", "朋友圈正文"),
+        ("selling_points", "卖点清单"),
+        ("hashtags", "话题标签"),
+        ("publishing_tips", "发布建议"),
+    )
+    for key, heading in mapping:
+        value = report.get(key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            body = "\n".join(f"- {str(item).strip()}" for item in value if str(item).strip())
+        else:
+            body = str(value).strip()
+        if body:
+            parts.append(f"## {heading}\n{body}")
+    return "\n\n".join(parts)
+
+
+def _run_write_copy_report(
+    db: Session,
+    agent_session: AgentSession,
+    llm: AgentLLMClient,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """文案报告：LLM 产出 → 解析（剥代码围栏，兼容 content/sections 两种键）→ 落库供下载。"""
+    from productflow_backend.infrastructure.db.models import CopyReport
+
     brief = str(arguments.get("brief", "")).strip()
     if not brief:
         return {"status": "error", "message": "报告需求为空，先明确产品和活动。"}
@@ -709,17 +856,197 @@ def _run_write_copy_report(llm: AgentLLMClient, arguments: dict[str, Any]) -> di
         tools=[],
         intent="copy_report",
     )
-    report: dict[str, Any] = {}
+    title = ""
+    content_md = ""
     if response.content:
         try:
-            cleaned = response.content.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("```")[1].removeprefix("json").strip()
-            parsed = json.loads(cleaned)
+            parsed = json.loads(_strip_code_fence(response.content))
             if isinstance(parsed, dict):
-                report = parsed
+                title = str(parsed.get("title") or parsed.get("headline") or "").strip()
+                content_md = str(parsed.get("content") or "").strip()
+                if not content_md:
+                    content_md = _sections_to_markdown(parsed.get("sections"))
+                if not content_md:
+                    content_md = _legacy_report_fields_to_markdown(parsed)
         except (TypeError, ValueError):
-            report = {}
-    if not report:
-        report = {"moments_caption": (response.content or "").strip()}
-    return {"status": "completed", "report": report}
+            title, content_md = "", ""
+    if not content_md:
+        # 解析失败也照常落一份纯文本报告，保证用户拿得到产物
+        content_md = (response.content or "").strip()
+    if not title:
+        title = brief[:40] or "文案报告"
+    report = CopyReport(
+        agent_session_id=agent_session.id,
+        title=title[:255],
+        content_md=content_md,
+    )
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    return {
+        "status": "ok",
+        "report_id": report.id,
+        "title": title,
+        "download_url": f"/api/agent/copy-reports/{report.id}/download",
+        "preview": content_md[:300],
+    }
+
+
+_RERENDER_COPY_FIELD_LABELS = {
+    "price": "价格",
+    "product_name": "商品名",
+    "headline": "主标题",
+    "selling_points": "卖点",
+    "instruction": "行动号召",
+}
+
+
+def _rerender_context_lines(context_text: str | None) -> tuple[str, list[str]]:
+    """把结构化文案上下文拆成 (主标题, 卖点列表)，兼容 Summary:/摘要：两种前缀。"""
+    lines = [line.strip() for line in (context_text or "").splitlines() if line.strip()]
+    if not lines:
+        return "", []
+    first = lines[0]
+    if first.lower().startswith("summary:"):
+        headline = first.split(":", 1)[1].strip()
+    else:
+        headline = first.removeprefix("摘要：").strip()
+    return headline, lines[1:4]
+
+
+def _run_rerender_poster_copy(db: Session, arguments: dict[str, Any]) -> dict[str, Any]:
+    """参数槽重渲：商品海报只改文字时，本地 PIL 秒级重渲一张新变体（不耗生图额度）。"""
+    from productflow_backend.application.contracts import PosterGenerationInput
+    from productflow_backend.application.copy_payloads import copy_payload_context_text, validate_copy_payload
+    from productflow_backend.domain.enums import CopyStatus, PosterKind, SourceAssetKind
+    from productflow_backend.infrastructure.db.models import CopySet, PosterVariant, Product
+    from productflow_backend.infrastructure.poster.renderer import PosterRenderer
+    from productflow_backend.infrastructure.storage import LocalStorage
+
+    product_id = str(arguments.get("product_id", "")).strip()
+    kind_value = str(arguments.get("poster_kind", "")).strip()
+    copy_overrides = arguments.get("copy") if isinstance(arguments.get("copy"), dict) else {}
+    if not product_id:
+        return {"status": "error", "message": "缺少商品 id。"}
+    if kind_value not in {"main_image", "promo_poster"}:
+        return {"status": "error", "message": "poster_kind 只支持 main_image 或 promo_poster。"}
+    known_overrides = {key: value for key, value in copy_overrides.items() if key in _RERENDER_COPY_FIELD_LABELS}
+    if not known_overrides:
+        return {
+            "status": "error",
+            "message": (
+                "没有可识别的文字字段：请提供 price（价格）、headline（标题）、"
+                "selling_points（卖点）、instruction（行动号召）或 product_name 中至少一项。"
+            ),
+        }
+    product = db.get(Product, product_id)
+    if product is None:
+        return {"status": "error", "message": "找不到这个商品，请确认商品后再试。"}
+    kind = PosterKind.MAIN_IMAGE if kind_value == "main_image" else PosterKind.PROMO_POSTER
+
+    original_asset = next(
+        (
+            asset
+            for asset in sorted(product.source_assets, key=lambda item: (item.created_at, item.id), reverse=True)
+            if asset.kind == SourceAssetKind.ORIGINAL_IMAGE
+        ),
+        None,
+    )
+    if original_asset is None:
+        return {"status": "error", "message": "这个商品没有原始商品图，无法本地重渲，请先上传商品图或改用生图工具。"}
+
+    copy_sets = sorted(product.copy_sets, key=lambda item: (item.created_at, item.id), reverse=True)
+    copy_set: CopySet | None = None
+    headline, selling_points = "", []
+    for candidate in copy_sets:
+        if not isinstance(candidate.structured_payload, dict):
+            continue
+        try:
+            context_text = copy_payload_context_text(validate_copy_payload(candidate.structured_payload))
+        except ValueError:
+            continue
+        headline, selling_points = _rerender_context_lines(context_text)
+        copy_set = candidate
+        break
+
+    changed_fields: list[str] = []
+    price = str(product.price) if product.price is not None else None
+    product_name = product.name
+    instruction: str | None = None
+    for key, value in known_overrides.items():
+        if key == "price" and str(value).strip():
+            price = str(value).strip()
+        elif key == "product_name" and str(value).strip():
+            product_name = str(value).strip()
+        elif key == "headline" and str(value).strip():
+            headline = str(value).strip()
+        elif key == "selling_points" and isinstance(value, list):
+            selling_points = [str(item).strip() for item in value if str(item).strip()][:3]
+        elif key == "instruction" and str(value).strip():
+            instruction = str(value).strip()
+        else:
+            continue
+        changed_fields.append(key)
+    if not changed_fields:
+        return {"status": "error", "message": "提供的文字字段都是空的，没有需要修改的内容。"}
+
+    context_lines = [f"摘要：{headline}"] if headline else []
+    context_lines.extend(selling_points)
+    structured_copy_context = "\n".join(context_lines) or None
+    effective_instruction = instruction or headline or product_name
+    render_input = PosterGenerationInput(
+        copy_prompt_mode="copy" if structured_copy_context else "image_edit",
+        product_name=product_name,
+        category=product.category,
+        price=price,
+        source_note=product.source_note,
+        instruction=effective_instruction,
+        structured_copy_context=structured_copy_context,
+        source_image=LocalStorage().resolve(original_asset.storage_path),
+    )
+    content = PosterRenderer().render(render_input, kind)
+    width, height = 1080, (1080 if kind == PosterKind.MAIN_IMAGE else 1440)
+
+    storage = LocalStorage()
+    relative_path = storage.save_generated_image(
+        product.id,
+        f"agent-rerender-{kind.value}",
+        content,
+        suffix=".png",
+    )
+    if copy_set is None:
+        # 商品还没有任何文案版本：落一个占位文案集承接新变体（复用工作流上下文文案的形态）
+        copy_set = CopySet(
+            product_id=product.id,
+            creative_brief_id=None,
+            status=CopyStatus.DRAFT,
+            structured_payload=None,
+            provider_name="agent_rerender",
+            model_name="local_renderer",
+            prompt_version="v1",
+        )
+        db.add(copy_set)
+        db.flush()
+    variant = PosterVariant(
+        product_id=product.id,
+        copy_set_id=copy_set.id,
+        kind=kind,
+        template_name=f"agent-rerender:{'default-main' if kind == PosterKind.MAIN_IMAGE else 'default-promo'}",
+        storage_path=relative_path,
+        mime_type="image/png",
+        width=width,
+        height=height,
+    )
+    db.add(variant)
+    db.flush()
+    variant_id = variant.id
+    db.commit()
+    return {
+        "status": "ok",
+        "poster_id": variant_id,
+        "poster_kind": kind.value,
+        "download_url": f"/api/posters/{variant.id}/download",
+        "preview_url": f"/api/posters/{variant.id}/download?variant=preview",
+        "changed_fields": changed_fields,
+        "message": "海报文字已更新，秒级重渲完成，可在商品页查看新版本。",
+    }

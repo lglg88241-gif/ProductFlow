@@ -34,6 +34,7 @@ from productflow_backend.infrastructure.queue import (
     recover_unfinished_image_session_generation_tasks,
     recover_unfinished_workflow_runs,
 )
+from productflow_backend.infrastructure.storage_cleanup import run_cleanup
 
 configure_logging()
 get_broker()
@@ -42,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 # 队列周期对账间隔（秒）：运行中 Redis 丢消息/滞留时由 DB（authoritative state）兜底补发
 DEFAULT_RECONCILE_INTERVAL_SECONDS = 1800
+
+# 存储生命周期清理间隔（秒）：只清无 DB 引用的孤儿文件与过期导出，默认每天一次
+DEFAULT_STORAGE_CLEANUP_INTERVAL_SECONDS = 86400
+DEFAULT_STORAGE_CLEANUP_INITIAL_DELAY_SECONDS = 600
 
 
 def get_image_session_worker_failsafe_time_limit_ms() -> int:
@@ -138,8 +143,61 @@ def start_queue_reconcile_daemon() -> threading.Thread:
     return thread
 
 
+def get_storage_cleanup_interval_seconds() -> int:
+    """存储清理间隔（秒）：读环境变量 MEDIA_CLEANUP_INTERVAL_SECONDS，默认 86400，非法值回退默认。"""
+    raw = os.getenv("MEDIA_CLEANUP_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return DEFAULT_STORAGE_CLEANUP_INTERVAL_SECONDS
+    try:
+        interval = int(raw)
+    except ValueError:
+        logger.warning("MEDIA_CLEANUP_INTERVAL_SECONDS 不是合法整数，使用默认值: %s", raw)
+        return DEFAULT_STORAGE_CLEANUP_INTERVAL_SECONDS
+    return interval if interval > 0 else DEFAULT_STORAGE_CLEANUP_INTERVAL_SECONDS
+
+
+def _storage_cleanup_once() -> None:
+    """清理一次：只删无 DB 引用的孤儿文件与过期导出（storage_cleanup 内部宁漏勿误删）。"""
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    try:
+        db = get_session_factory()()
+        try:
+            report = run_cleanup(db, dry_run=False)
+        finally:
+            db.close()
+        logger.info("存储生命周期清理完成: %s", report)
+    except Exception:
+        logger.exception("存储周期清理失败")
+
+
+def run_storage_cleanup_loop(
+    interval_seconds: float | None = None,
+    *,
+    stop_event: threading.Event | None = None,
+    initial_delay_seconds: float = DEFAULT_STORAGE_CLEANUP_INITIAL_DELAY_SECONDS,
+) -> None:
+    """存储清理循环：先等 initial_delay（避开启动高峰）再首次清理，之后每 interval 一次。"""
+    resolved_interval = interval_seconds if interval_seconds is not None else get_storage_cleanup_interval_seconds()
+    stop = stop_event or threading.Event()
+    if stop.wait(timeout=initial_delay_seconds):
+        return
+    while not stop.is_set():
+        _storage_cleanup_once()
+        if stop.wait(timeout=resolved_interval):
+            return
+
+
+def start_storage_cleanup_daemon() -> threading.Thread:
+    """worker 启动时开启存储生命周期清理 daemon 线程。"""
+    thread = threading.Thread(target=run_storage_cleanup_loop, name="storage-cleanup", daemon=True)
+    thread.start()
+    return thread
+
+
 if _running_under_dramatiq_cli():
     cleanup_old_logs()
     recover_unfinished_workflow_runs(reset_stale_running=True)
     recover_unfinished_image_session_generation_tasks(reset_stale_running=True)
     start_queue_reconcile_daemon()
+    start_storage_cleanup_daemon()

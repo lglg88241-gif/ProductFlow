@@ -6,6 +6,35 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Multi-candidate generation (A)**: the agent's `generate_image` accepts `count` (1–4,
+  default 2) and returns `candidates` (asset id / url / label) with `primary_url`; when the
+  durable queue is still working it reports `pending` + `expected_candidates`. The workbench
+  renders a side-by-side candidate card with download and "continue from this one" actions.
+- **Copy report persistence (E)**: `write_copy_report` now strips code fences, tolerates
+  `content`/`sections` shapes, persists a `CopyReport` row (migration `20260914_0034`) and
+  returns `report_id` + `download_url`; new `GET /api/agent/copy-reports/{id}/download`
+  serves the markdown as an attachment (RFC 5987 UTF-8 filenames). The workbench gains a
+  report card with preview and download.
+- **Localized text re-render (B)**: new `rerender_poster_copy` agent tool rebuilds
+  `PosterGenerationInput` from the stored product + latest copy set, applies partial copy
+  overrides, re-renders locally with the PIL poster renderer (no image-model quota), and
+  stores a new poster variant with a download URL. Prompt guidance routes text-only edits
+  here and visual edits to `edit_image` / `generate_image` (result-feedback editing).
+- **Token usage observability**: agent LLM responses carry parsed `usage`; assistant
+  messages persist `prompt_tokens` / `completion_tokens` / `total_tokens` (migration
+  `20260914_0033`); new `GET /api/metrics/summary` aggregates totals and a 7-day daily
+  breakdown. LLM calls log model + latency; fallback switchovers log a warning
+  (with the primary failure reason, secrets scrubbed).
+- **Storage lifecycle**: new `storage_cleanup` module finds DB-unreferenced orphan files
+  and stale exports (never deleting referenced files; dry-run by default). The worker runs
+  it on a daemon thread (initial delay 10 min, default every 24 h via
+  `MEDIA_CLEANUP_INTERVAL_SECONDS`).
+- **Queue reconciliation loop**: the worker re-runs unfinished-task recovery every 30 min
+  (env `RECONCILE_INTERVAL_SECONDS`) so messages stuck mid-run no longer wait for a restart.
+- **SSE heartbeat**: the agent stream emits `: ping` comment frames via a producer thread
+  while tools run; nginx reads timeout raised to 300 s with buffering off, and the browser
+  parser skips comment frames.
+
 - **Product pipeline as agent tools (P2-10)**: the frozen product workflow is now
   reachable conversationally — `run_product_pipeline` creates a product from a
   library image and submits the full workflow (understanding → copy → image),
@@ -77,8 +106,32 @@ All notable changes for ProductFlow are recorded here.
 - Production environments (`APP_ENV=production`) reject disabling the admin access key through runtime config or settings import.
 - `/healthz` now reports `admin_access_required`; startup logs warn when auth is disabled or secure cookies are off.
 - Docker Compose publishes Postgres/Redis host ports on 127.0.0.1 only.
+- Remote image downloads are funneled through an SSRF-guarded fetcher: http/https only,
+  per-hop DNS resolution rejecting private/loopback/link-local/reserved/multicast targets
+  (IPv4+IPv6), manual redirect re-validation, 30 MB streaming cap (`REMOTE_FETCH_ALLOW_PRIVATE_NETWORK=1`
+  escape hatch for local dev).
+- Production startup fails fast when `ADMIN_ACCESS_REQUIRED=false` (development keeps the
+  warning-only behavior). `/api/auth/session` rate-limits failed key attempts per IP
+  (6th within 15 min → 429 + Retry-After). `/healthz` provider summary no longer exposes
+  relay host/base URLs (keeps kind / model / has_key / fallback presence).
+- Docker Compose publishes the backend port on 127.0.0.1 only (nginx is the same-origin
+  entrypoint) and the worker now receives the full `AGENT_*` set.
 
 ### Fixed
+
+- **SSE behind nginx**: agent streams were cut at nginx's default 60 s idle timeout during
+  long tool executions (Docker deployments only); heartbeat frames + `proxy_read_timeout 300s`
+  keep the stream alive for the full turn.
+- **Orphan tool_calls poisoning sessions**: a client disconnect between the two history
+  commits could leave an assistant tool_calls message without its tool results, making every
+  subsequent request fail with a 400 forever. Message building now skips incomplete
+  tool-call groups (stateless self-heal).
+- **Unbounded image generation waits**: image provider clients now carry explicit
+  httpx timeouts and the background poll enforces an overall deadline
+  (`IMAGE_GENERATION_PROVIDER_TIMEOUT_SECONDS`, default 300 s); the worker failsafe
+  time limit dropped from 24 h to 1 h (env-overridable).
+- Docker Compose default drift: worker `IMAGE_GENERATE_MODEL` default unified to
+  `gpt-image-2`.
 
 - **Relay resilience (P1)**: image provider retries empty payloads (HTTP 200 with
   neither `b64_json` nor `url`) and retries remote image downloads; the designer

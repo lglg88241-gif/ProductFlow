@@ -4,8 +4,10 @@ import logging
 import queue
 import threading
 from collections.abc import Generator
+from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from productflow_backend.application.asset_library import (
@@ -25,6 +27,7 @@ from productflow_backend.application.designer_agent.loop import (
     run_agent_turn_events,
 )
 from productflow_backend.domain.errors import BusinessError
+from productflow_backend.infrastructure.db.models import CopyReport
 from productflow_backend.presentation.deps import get_session, require_admin, require_deletion_enabled
 from productflow_backend.presentation.image_variants import serve_image_variant
 from productflow_backend.presentation.schemas.agent import (
@@ -259,6 +262,66 @@ def export_asset_grid_endpoint(
 )
 def delete_agent_asset_endpoint(asset_id: str, session: Session = Depends(get_session)) -> None:
     delete_asset_entry(session, asset_id)
+
+
+def _copy_report_content_disposition(filename: str) -> str:
+    """中文文件名按 RFC 5987 编码（与 FileResponse 行为一致），ASCII 名直接内联。"""
+    quoted = quote(filename)
+    if quoted == filename:
+        return f'attachment; filename="{filename}"'
+    return f"attachment; filename*=utf-8''{quoted}"
+
+
+def _copy_report_filename(report: CopyReport) -> str:
+    """用报告标题命名下载文件；标题缺省或含非法字符时回退 report-{id}.md。"""
+    title = (report.title or "").strip()
+    sanitized = "".join(
+        char for char in title if char not in '\\/:*?"<>|' and char.isprintable()
+    ).strip(". ")
+    stem = sanitized or f"report-{report.id}"
+    return f"{stem}.md"
+
+
+@router.get("/copy-reports")
+def list_agent_copy_reports_endpoint(
+    session_id: str | None = None,
+    session: Session = Depends(get_session),
+) -> dict:
+    """按会话过滤列出文案报告（可选 session_id）。"""
+    query = select(CopyReport).order_by(CopyReport.created_at.desc(), CopyReport.id)
+    if session_id:
+        query = query.where(CopyReport.agent_session_id == session_id)
+    reports = list(session.scalars(query).all())
+    return {
+        "items": [
+            {
+                "id": report.id,
+                "agent_session_id": report.agent_session_id,
+                "title": report.title,
+                "download_url": f"/api/agent/copy-reports/{report.id}/download",
+                "created_at": report.created_at.isoformat(),
+            }
+            for report in reports
+        ]
+    }
+
+
+@router.get("/copy-reports/{report_id}/download")
+def download_agent_copy_report_endpoint(
+    report_id: str,
+    session: Session = Depends(get_session),
+) -> Response:
+    """下载文案报告 markdown 附件。"""
+    report = session.get(CopyReport, report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="文案报告不存在")
+    return Response(
+        content=report.content_md or "",
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": _copy_report_content_disposition(_copy_report_filename(report)),
+        },
+    )
 
 
 @router.post("/sessions/{agent_session_id}/messages", response_model=AgentTurnResponse)

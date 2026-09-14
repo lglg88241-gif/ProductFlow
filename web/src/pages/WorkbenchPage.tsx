@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Paperclip, Plus, Send } from "lucide-react";
 
+import { CopyReportCard } from "../components/CopyReportCard";
+import { MultiCandidateCard, shouldRenderMultiCandidates } from "../components/MultiCandidateCard";
+import { PosterRerenderCard } from "../components/PosterRerenderCard";
 import { TopNav } from "../components/TopNav";
 import { api, ApiError } from "../lib/api";
 import type {
@@ -147,7 +150,7 @@ function RecommendationCards({
   );
 }
 
-function CopyReportCard({ event }: { event: AgentToolEvent }) {
+function CopyReportDetailCard({ event }: { event: AgentToolEvent }) {
   const { t } = useI18n();
   const report: AgentCopyReport | undefined = event.result.report;
   if (!report) return null;
@@ -198,14 +201,37 @@ function GridExportCard({ event }: { event: AgentToolEvent }) {
   );
 }
 
-function ToolEventCard({ event, onPick }: { event: AgentToolEvent; onPick: (message: string) => void }) {
+function ToolEventCard({
+  event,
+  onPick,
+  onContinue,
+}: {
+  event: AgentToolEvent;
+  onPick: (message: string) => void;
+  onContinue: (message: string) => void;
+}) {
   if (event.tool === "write_copy") return <CopyProposals event={event} />;
-  if (event.tool === "generate_image" || event.tool === "edit_image") return <GeneratedImages event={event} />;
+  if (event.tool === "generate_image") {
+    // 候选多于 1 张、或异步生成中暂无候选时用候选对比卡；恰好 1 张保持原渲染
+    if (shouldRenderMultiCandidates(event.result)) {
+      return <MultiCandidateCard event={event} onContinue={onContinue} />;
+    }
+    return <GeneratedImages event={event} />;
+  }
+  if (event.tool === "edit_image") return <GeneratedImages event={event} />;
   if (event.tool === "search_assets") return <AssetMatches event={event} />;
   if (event.tool === "analyze_template") return <TemplateProfile event={event} />;
   if (event.tool === "export_moments_grid") return <GridExportCard event={event} />;
   if (event.tool === "recommend_designs") return <RecommendationCards event={event} onPick={onPick} />;
-  if (event.tool === "write_copy_report") return <CopyReportCard event={event} />;
+  if (event.tool === "write_copy_report") {
+    return (
+      <>
+        <CopyReportCard event={event} />
+        <CopyReportDetailCard event={event} />
+      </>
+    );
+  }
+  if (event.tool === "rerender_poster_copy") return <PosterRerenderCard event={event} />;
   return null;
 }
 
@@ -215,6 +241,7 @@ export function WorkbenchPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
   const sessionsQuery = useQuery({ queryKey: ["agent-sessions"], queryFn: api.listAgentSessions });
 
@@ -430,6 +457,10 @@ export function WorkbenchPage() {
                     key={`stream-event-${index}`}
                     event={event}
                     onPick={(message: string) => void sendAgentMessage(message)}
+                    onContinue={(message: string) => {
+                      setDraft(message);
+                      composerRef.current?.focus();
+                    }}
                   />
                 ))}
               </div>
@@ -505,6 +536,7 @@ export function WorkbenchPage() {
                 )}
               </button>
               <textarea
+                ref={composerRef}
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {

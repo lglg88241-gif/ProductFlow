@@ -680,3 +680,22 @@ class AssetLibraryEntry(Base):
     image_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class CopyReport(Base):
+    """Agent 产出的文案报告：落库为 markdown，供下载与按会话回看。"""
+
+    __tablename__ = "copy_reports"
+    __table_args__ = (
+        Index("ix_copy_reports_agent_session_created", "agent_session_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    agent_session_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("agent_sessions.id", ondelete="SET NULL", name="fk_copy_reports_agent_session_id"),
+        nullable=True,
+    )
+    title: Mapped[str] = mapped_column(String(255))
+    content_md: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

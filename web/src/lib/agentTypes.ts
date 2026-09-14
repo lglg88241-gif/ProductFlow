@@ -51,6 +51,15 @@ export interface AgentToolEvent {
     matches?: AgentAssetEntry[];
     recommendations?: AgentDesignRecommendation[];
     report?: AgentCopyReport;
+    report_id?: string;
+    preview?: string;
+    changed_fields?: string[];
+    poster_id?: string;
+    poster_kind?: string;
+    candidates?: Array<{ asset_id: string; url: string; label: string }>;
+    primary_url?: string;
+    pending?: boolean;
+    expected_candidates?: number;
     template_profile?: Record<string, unknown> | null;
     tags?: string[];
     title?: string;
