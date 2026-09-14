@@ -48,7 +48,11 @@ def test_full_operator_journey_from_login_to_deliverable_cleanup(configured_env:
         # 1. 启动即健康，受保护 API 未登录不可见
         health = client.get("/healthz")
         assert health.status_code == 200
-        assert health.json() == {"status": "ok", "admin_access_required": True}
+        health_payload = health.json()
+        assert health_payload["status"] == "ok"
+        assert health_payload["admin_access_required"] is True
+        # P1-5：healthz 同时暴露供应商摘要（不含密钥）
+        assert set(health_payload["providers"]) == {"agent", "image"}
         assert client.get("/api/products").status_code == 401
 
         # 2. 错误密钥拒绝，正确密钥登录
