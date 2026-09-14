@@ -176,11 +176,34 @@ function CopyReportCard({ event }: { event: AgentToolEvent }) {
   );
 }
 
+function GridExportCard({ event }: { event: AgentToolEvent }) {
+  const { t } = useI18n();
+  const url = event.result.download_url;
+  if (!url) return null;
+  return (
+    <div className="mt-2 flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2">
+      <div className="text-sm text-emerald-800">
+        <p className="font-medium">
+          {event.result.grid_label ?? event.result.grid} · {event.result.title ?? ""}
+        </p>
+        <p className="text-xs text-emerald-600">{event.result.message ?? ""}</p>
+      </div>
+      <a
+        href={url}
+        className="shrink-0 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+      >
+        {t("workbench.download")}
+      </a>
+    </div>
+  );
+}
+
 function ToolEventCard({ event, onPick }: { event: AgentToolEvent; onPick: (message: string) => void }) {
   if (event.tool === "write_copy") return <CopyProposals event={event} />;
   if (event.tool === "generate_image" || event.tool === "edit_image") return <GeneratedImages event={event} />;
   if (event.tool === "search_assets") return <AssetMatches event={event} />;
   if (event.tool === "analyze_template") return <TemplateProfile event={event} />;
+  if (event.tool === "export_moments_grid") return <GridExportCard event={event} />;
   if (event.tool === "recommend_designs") return <RecommendationCards event={event} onPick={onPick} />;
   if (event.tool === "write_copy_report") return <CopyReportCard event={event} />;
   return null;

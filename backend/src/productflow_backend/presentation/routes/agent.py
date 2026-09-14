@@ -165,6 +165,36 @@ def download_agent_asset_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/assets/{asset_id}/grid-export")
+def export_asset_grid_endpoint(
+    asset_id: str,
+    grid: str = "3x3",
+    fmt: str = "png",
+    session: Session = Depends(get_session),
+):
+    """把素材切成朋友圈分格切片（zip 下载）。"""
+    from fastapi import Response
+
+    from productflow_backend.application.grid_export import slice_into_grid
+    from productflow_backend.infrastructure.storage import LocalStorage
+
+    entry = get_asset_entry(session, asset_id)
+    try:
+        raw = LocalStorage().resolve(entry.storage_path).read_bytes()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="素材文件不存在") from exc
+    result = slice_into_grid(raw, grid=grid, fmt=fmt)
+    filename = f"asset-{asset_id[:8]}-{result.grid}.zip"
+    return Response(
+        content=result.archive,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Grid-Tiles": str(result.tile_count),
+        },
+    )
+
+
 @router.delete(
     "/assets/{asset_id}",
     status_code=status.HTTP_204_NO_CONTENT,

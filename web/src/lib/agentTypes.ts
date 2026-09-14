@@ -45,6 +45,9 @@ export interface AgentToolEvent {
       size: string;
     }>;
     copies?: Array<{ title?: string; content?: string; hashtags?: string[] }>;
+    download_url?: string;
+    grid?: string;
+    grid_label?: string;
     matches?: AgentAssetEntry[];
     recommendations?: AgentDesignRecommendation[];
     report?: AgentCopyReport;

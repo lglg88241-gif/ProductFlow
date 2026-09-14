@@ -202,3 +202,88 @@ def test_save_asset_tool_archives_generated_image(configured_env: Path, install_
         assert asset_id
     finally:
         db.close()
+
+
+def test_generate_image_with_template_injects_style_constraints(configured_env: Path, install_scripted_llm) -> None:
+    """P2-8 模板风格复刻：generate_image 传 template_asset_id 时注入风格约束段。"""
+    from productflow_backend.application.asset_library import register_asset_upload
+    from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    db = get_session_factory()()
+    try:
+        template = register_asset_upload(
+            db, kind="template", filename="tpl.png", content=_png_bytes()
+        )
+        # 模拟 analyze_template 已建档
+        template.template_profile_json = {
+            "summary": "紫底促销风",
+            "layout": "上图下文",
+            "palette": ["深紫", "金"],
+            "typography": "黑体冲击力强",
+            "copy_slots": "标题 1、价格 1",
+            "mood": "热烈",
+        }
+        db.commit()
+
+        install_scripted_llm(
+            [
+                AgentLLMResponse(
+                    content=None,
+                    tool_calls=[
+                        AgentToolCall(
+                            call_id="call-tpl-1",
+                            name="generate_image",
+                            arguments={
+                                "prompt": "美容院开业海报",
+                                "size": "1024x1024",
+                                "template_asset_id": template.id,
+                            },
+                        )
+                    ],
+                ),
+                AgentLLMResponse(content="按这个模板的风格出图啦。"),
+            ]
+        )
+        agent_session = create_agent_session(db)
+        result = run_agent_turn(db, agent_session_id=agent_session.id, user_content="按这个模板风格做一张")
+
+        tool_result = json.loads([m for m in result.messages if m.role == "tool"][-1].content)
+        assert tool_result["status"] == "completed", tool_result
+        assert tool_result["template_title"] == template.title
+        injected = tool_result["prompt"]
+        assert "上图下文" in injected and "深紫" in injected and "黑体冲击力强" in injected
+        assert "不要照抄" in injected
+    finally:
+        db.close()
+
+
+def test_generate_image_with_unknown_template_reports_error(configured_env: Path, install_scripted_llm) -> None:
+    """模板 id 不存在时给出人话错误，不静默降级。"""
+    from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    install_scripted_llm(
+        [
+            AgentLLMResponse(
+                content=None,
+                tool_calls=[
+                    AgentToolCall(
+                        call_id="call-bad-tpl",
+                        name="generate_image",
+                        arguments={"prompt": "海报", "template_asset_id": "no-such-asset"},
+                    )
+                ],
+            ),
+            AgentLLMResponse(content="这个模板我这边没找到，重新选一个吧。"),
+        ]
+    )
+    db = get_session_factory()()
+    try:
+        agent_session = create_agent_session(db)
+        result = run_agent_turn(db, agent_session_id=agent_session.id, user_content="按那个模板做")
+        tool_result = json.loads([m for m in result.messages if m.role == "tool"][-1].content)
+        assert tool_result["status"] == "error"
+        assert "素材库" in tool_result["message"]
+    finally:
+        db.close()

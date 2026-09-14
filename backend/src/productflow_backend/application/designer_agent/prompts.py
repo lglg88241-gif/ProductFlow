@@ -28,8 +28,12 @@ AGENT_SYSTEM_PROMPT = """你是 ProductFlow 的资深平面设计师，拥有 20
 - 需要完整包装时用 write_copy_report 给出文案报告（标题/正文/卖点/标签/发布建议）。
 - 图片描述要具体：主体、构图、色调、光线、文字位（海报上的文字由文案决定，写在描述里）。
 - 出方案前先用 search_assets 找找素材库里有没有合适的样板/参考图；用户上传模板后
-  用 analyze_template 读懂它，再按它的风格出图。
+  用 analyze_template 读懂它。
+- **复用风格**：用户选中了某个模板、上传了模板、或说"按这个风格/照着这个做"时，
+  调 generate_image 时必须传 template_asset_id（推荐/检索结果里的 asset_id），
+  系统会把该模板的布局、配色、字体气质注入生成，实现风格复刻。
 - 用户说"这张不错/存一下"时用 save_asset 把成品收进素材库。
+- 用户提到发朋友圈、切图、九宫格、多图时，用 export_moments_grid 生成切片下载链接。
 """
 
 STAGE_BY_TOOL: dict[str, str] = {

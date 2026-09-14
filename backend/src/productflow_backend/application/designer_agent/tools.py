@@ -43,6 +43,13 @@ def tool_schemas() -> list[dict[str, Any]]:
                             "type": "string",
                             "description": "宽x高像素，如 1024x1024 方图、1080x1440 朋友圈海报；缺省 1024x1024",
                         },
+                        "template_asset_id": {
+                            "type": "string",
+                            "description": (
+                                "可选：素材库中的模板 id。用户选中/上传了模板、要求'按这个风格'时必填，"
+                                "系统会把该模板的布局/配色/字体气质约束注入生成提示，实现风格复刻。"
+                            ),
+                        },
                     },
                     "required": ["prompt"],
                 },
@@ -127,6 +134,30 @@ def tool_schemas() -> list[dict[str, Any]]:
                     "properties": {
                         "asset_id": {"type": "string", "description": "图片会话中的资产 id，缺省保存最新产出"},
                         "title": {"type": "string", "description": "可选，素材命名"},
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "export_moments_grid",
+                "description": (
+                    "把一张成品/素材切成朋友圈分格切片（九宫格等），返回 zip 下载链接。"
+                    "用户说'发朋友圈''切九宫格''做多图'时使用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "asset_id": {
+                            "type": "string",
+                            "description": "素材库素材 id；缺省使用本会话最新产出的图",
+                        },
+                        "grid": {
+                            "type": "string",
+                            "enum": ["3x3", "2x2", "3x1", "1x3"],
+                            "description": "分格方式，默认 3x3 九宫格",
+                        },
                     },
                 },
             },
@@ -244,6 +275,7 @@ def execute_tool(
                 prompt=str(arguments.get("prompt", "")),
                 size=arguments.get("size"),
                 base_asset_id=None,
+                template_asset_id=str(arguments.get("template_asset_id", "")) or None,
             )
         if name == "edit_image":
             return _run_generation(
@@ -304,6 +336,8 @@ def execute_tool(
             )
             _auto_tag_entry(db, entry, llm)
             return {"status": "completed", "message": "已存入素材库。", **_asset_summary(entry)}
+        if name == "export_moments_grid":
+            return _run_export_grid(db, agent_session, arguments)
         if name == "recommend_designs":
             return _run_recommend_designs(db, llm, arguments)
         if name == "write_copy_report":
@@ -313,6 +347,27 @@ def execute_tool(
         return {"status": "error", "message": _friendly_generation_error(exc), "detail": str(exc)[:200]}
 
 
+def _template_style_block(entry: Any) -> str:
+    """把模板档案转成生成提示的风格约束段（P2-8：识别即可复刻）。"""
+    profile = entry.template_profile_json or {}
+    parts: list[str] = []
+    if profile.get("layout"):
+        parts.append(f"布局遵循：{profile['layout']}")
+    palette = profile.get("palette")
+    if palette:
+        joined = " / ".join(str(item) for item in palette) if isinstance(palette, list) else str(palette)
+        parts.append(f"配色使用：{joined}")
+    if profile.get("typography"):
+        parts.append(f"字体气质：{profile['typography']}")
+    if profile.get("copy_slots"):
+        parts.append(f"文案位安排：{profile['copy_slots']}")
+    if profile.get("mood"):
+        parts.append(f"整体气质：{profile['mood']}")
+    if not parts:
+        return f"参考模板「{entry.title}」的整体风格"
+    return "严格按照以下模板风格出图（复用其版式语言，不要照抄其中文字与品牌标识）：" + "；".join(parts)
+
+
 def _run_generation(
     db: Session,
     agent_session: AgentSession,
@@ -320,22 +375,34 @@ def _run_generation(
     prompt: str,
     size: Any,
     base_asset_id: str | None,
+    template_asset_id: str | None = None,
 ) -> dict[str, Any]:
     if not prompt.strip():
         return {"status": "error", "message": "图片描述为空，需要先明确画什么。"}
     resolved_size = normalize_image_generation_size(size or DEFAULT_IMAGE_SIZE)
+    effective_prompt = prompt
+    template_title: str | None = None
+    if template_asset_id:
+        try:
+            template_entry = get_asset_entry(db, template_asset_id)
+        except Exception:  # noqa: BLE001 - 模板不存在时退回普通生成
+            return {"status": "error", "message": "这个模板不在素材库里，请重新选择或先上传。"}
+        template_title = template_entry.title
+        effective_prompt = prompt + "\n\n" + _template_style_block(template_entry)
     image_session_id = _ensure_agent_image_session(db, agent_session)
     detail = submit_image_session_generation_task(
         db,
         image_session_id=image_session_id,
-        prompt=prompt,
+        prompt=effective_prompt,
         size=resolved_size,
         base_asset_id=base_asset_id,
         generation_count=1,
     )
     summary = _generation_summary(detail)
-    summary["prompt"] = prompt
+    summary["prompt"] = effective_prompt
     summary["size"] = resolved_size
+    if template_title:
+        summary["template_title"] = template_title
     return summary
 
 
@@ -393,6 +460,48 @@ def _auto_tag_entry(db: Session, entry, llm: AgentLLMClient) -> None:
         db.refresh(entry)
     except Exception:  # noqa: BLE001 - 打标是增强能力，任何失败都不阻塞保存
         db.rollback()
+
+
+SUPPORTED_EXPORT_GRIDS = ("3x3", "2x2", "3x1", "1x3")
+
+
+def _run_export_grid(db: Session, agent_session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    """分格导出：素材 id 优先，缺省取本会话最新产出的图。"""
+    from productflow_backend.application.asset_library import list_asset_entries
+
+    grid = str(arguments.get("grid") or "3x3")
+    if grid not in SUPPORTED_EXPORT_GRIDS:
+        grid = "3x3"
+    requested = str(arguments.get("asset_id") or "").strip()
+
+    asset_id = requested or None
+    if asset_id is None:
+        # 本会话最新的一件成品（素材库 source=generated 且同会话）
+        candidates = [
+            entry
+            for entry in list_asset_entries(db, kind="output")
+            if entry.agent_session_id == agent_session.id
+        ]
+        if not candidates:
+            return {"status": "error", "message": "还没有可导出的成品图，先做一张吧。"}
+        asset_id = candidates[0].id
+
+    try:
+        entry = get_asset_entry(db, asset_id)
+    except Exception:  # noqa: BLE001
+        return {"status": "error", "message": "找不到这张图，请从素材库里选一张。"}
+
+    download_url = f"/api/agent/assets/{asset_id}/grid-export?grid={grid}"
+    grid_labels = {"3x3": "九宫格", "2x2": "四宫格", "3x1": "三横连", "1x3": "三竖连"}
+    return {
+        "status": "completed",
+        "asset_id": asset_id,
+        "title": entry.title,
+        "grid": grid,
+        "grid_label": grid_labels[grid],
+        "download_url": download_url,
+        "message": f"已生成{grid_labels[grid]}切片，点下载即可按顺序发朋友圈。",
+    }
 
 
 def _run_recommend_designs(db: Session, llm: AgentLLMClient, arguments: dict[str, Any]) -> dict[str, Any]:

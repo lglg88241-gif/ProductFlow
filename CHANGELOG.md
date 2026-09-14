@@ -6,6 +6,13 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Template-style generation (P2)**: `generate_image` accepts `template_asset_id`;
+  the analyzed template profile (layout, palette, typography, copy slots, mood) is
+  injected into the generation prompt so a selected/uploaded template can be replicated
+  in style without copying its text or brand marks.
+- **Moments grid export (P2)**: slice any asset into WeChat Moments tiles
+  (3x3 / 2x2 / 3x1 / 1x3) and download as an ordered zip; exposed as a REST endpoint
+  and an agent tool (`export_moments_grid`) with an inline download card in the workbench.
 - **Streaming designer agent (P0)**: new SSE endpoint
   `POST /api/agent/sessions/{id}/messages/stream` emits `stage` / `message` /
   `tool_start` / `tool_result` / `error` / `done` frames; the workbench renders
