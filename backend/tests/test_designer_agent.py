@@ -271,3 +271,71 @@ def test_agent_message_stream_reports_llm_error(configured_env: Path) -> None:
     assert "event: error" in body
     assert "AGENT_*" in body
     assert "event: done" in body
+
+
+def test_agent_nudges_model_when_first_round_has_no_tool_call(configured_env: Path, install_scripted_llm) -> None:
+    """工具优先：首轮只回文字时自动督促重试一次。"""
+    from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    llm = install_scripted_llm(
+        [
+            AgentLLMResponse(content="我可以帮你做海报哦，告诉我更多吧。"),  # 首轮：纯文字（失职）
+            AgentLLMResponse(
+                content=None,
+                tool_calls=[
+                    AgentToolCall(call_id="call-copy-x", name="write_copy", arguments={"brief": "开业文案"})
+                ],
+            ),
+            AgentLLMResponse(
+                content=json.dumps([{"title": "A", "content": "文案A", "hashtags": []}], ensure_ascii=False)
+            ),
+            AgentLLMResponse(content="文案来啦。"),
+        ]
+    )
+    db = get_session_factory()()
+    try:
+        agent_session = create_agent_session(db)
+        result = run_agent_turn(db, agent_session_id=agent_session.id, user_content="给我三版开业文案")
+
+        # 督促消息已注入 LLM 对话（system 角色）
+        nudged = [
+            call
+            for call in llm.calls
+            if any("系统提醒" in str(m.get("content", "")) for m in call["messages"] if m.get("role") == "system")
+        ]
+        assert nudged, "应注入系统督促消息后重试"
+
+        # 最终仍然通过工具完成
+        tools_used = [m.tool_name for m in result.messages if m.role == "tool"]
+        assert tools_used == ["write_copy"]
+        assert agent_session.stage == "produce"
+    finally:
+        db.close()
+
+
+def test_agent_nudge_skipped_when_tools_already_used(configured_env: Path, install_scripted_llm) -> None:
+    """已有工具执行的多轮循环不再督促（nudge 只针对首轮空谈）。"""
+    from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    llm = install_scripted_llm(
+        [
+            AgentLLMResponse(
+                content=None,
+                tool_calls=[AgentToolCall(call_id="call-g-1", name="generate_image",
+                                          arguments={"prompt": "海报"})],
+            ),
+            AgentLLMResponse(content="图好了。要我再改改颜色吗？"),  # 第二轮纯文字，属正常追问
+        ]
+    )
+    db = get_session_factory()()
+    try:
+        agent_session = create_agent_session(db)
+        result = run_agent_turn(db, agent_session_id=agent_session.id, user_content="出一张海报")
+
+        assert [m.tool_name for m in result.messages if m.role == "tool"] == ["generate_image"]
+        assert agent_session.stage == "review"
+        assert len(llm.calls) == 2  # 未触发督促重试
+    finally:
+        db.close()

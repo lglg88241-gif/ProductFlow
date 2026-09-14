@@ -16,6 +16,12 @@ from productflow_backend.domain.errors import NotFoundError
 from productflow_backend.infrastructure.db.models import AgentMessage, AgentSession
 
 MAX_TOOL_ROUNDS = 8
+# 首轮模型只回文字未调工具时的督促重试（一次），强制"工具优先"
+_TOOL_NUDGE_MESSAGE = (
+    "（系统提醒）用户在等待实际产出。请立即调用合适的工具完成请求"
+    "（文案用 write_copy、图用 generate_image/edit_image、方案用 recommend_designs），"
+    "不要只用文字回复。"
+)
 # 引导对话只需近期上下文；历史截断控制 token 成本与轮次延迟
 MAX_HISTORY_MESSAGES = 20
 _DEFAULT_SESSION_TITLE = "设计师会话"
@@ -127,6 +133,7 @@ def run_agent_turn(
     pending_generation_tasks: list[dict[str, Any]] = []
     used_tools: list[str] = []
 
+    tool_nudged = False
     for _ in range(MAX_TOOL_ROUNDS):
         try:
             response = client.chat(messages=llm_messages, tools=tool_schemas())
@@ -138,6 +145,10 @@ def run_agent_turn(
                 content=f"我这边连接设计模型时遇到了问题，请稍后再试一次。（{exc}）",
             )
             raise
+        if not response.tool_calls and not tool_nudged and not used_tools:
+            tool_nudged = True
+            llm_messages.append({"role": "system", "content": _TOOL_NUDGE_MESSAGE})
+            response = client.chat(messages=llm_messages, tools=tool_schemas())
         if response.tool_calls:
             _persist_message(
                 db,
@@ -283,6 +294,7 @@ def run_agent_turn_events(
             },
         }
 
+    tool_nudged = False
     for _ in range(MAX_TOOL_ROUNDS):
         try:
             response = client.chat(messages=llm_messages, tools=tool_schemas())
@@ -346,6 +358,23 @@ def run_agent_turn_events(
                     pending_generation_tasks.append({"image_session_id": result.get("image_session_id"), **task})
             continue
 
+        if not tool_nudged and not used_tools:
+            # 首轮只回文字未调工具：注入督促后重试一次（工具优先铁律）
+            tool_nudged = True
+            llm_messages.append({"role": "system", "content": _TOOL_NUDGE_MESSAGE})
+            try:
+                response = client.chat(messages=llm_messages, tools=tool_schemas())
+            except AgentLLMError as exc:
+                _persist_message(
+                    db,
+                    agent_session,
+                    role="assistant",
+                    content=f"我这边连接设计模型时遇到了问题，请稍后再试一次。（{exc}）",
+                )
+                db.expire_all()
+                yield {"event": "error", "data": {"message": str(exc)}}
+                yield from _finish()
+                return
         assistant_message = _persist_message(
             db,
             agent_session,
