@@ -15,14 +15,14 @@ function toolEvent(result: AgentToolEvent["result"]): AgentToolEvent {
   return { tool: "generate_image", result };
 }
 
-function candidate(assetId: number) {
+function candidate(assetId: string) {
   return { asset_id: assetId, url: `https://cdn.example.com/${assetId}.png`, label: `方案 ${assetId}` };
 }
 
 describe("MultiCandidateCard 渲染条件", () => {
   it("候选多于 1 张时出卡，恰好 1 张保持原渲染不套新卡", () => {
-    expect(shouldRenderMultiCandidates({ candidates: [candidate(1), candidate(2)] })).toBe(true);
-    expect(shouldRenderMultiCandidates({ candidates: [candidate(1)] })).toBe(false);
+    expect(shouldRenderMultiCandidates({ candidates: [candidate("1"), candidate("2")] })).toBe(true);
+    expect(shouldRenderMultiCandidates({ candidates: [candidate("1")] })).toBe(false);
     expect(shouldRenderMultiCandidates({})).toBe(false);
   });
 
@@ -42,7 +42,7 @@ describe("MultiCandidateCard 渲染内容", () => {
   it("渲染图片预览、label、下载与用这张继续按钮", () => {
     const html = renderToStaticMarkup(
       createElement(MultiCandidateCard, {
-        event: toolEvent({ candidates: [candidate(1), candidate(2)] }),
+        event: toolEvent({ candidates: [candidate("1"), candidate("2")] }),
         onContinue: () => undefined,
       }),
     );
@@ -55,14 +55,14 @@ describe("MultiCandidateCard 渲染内容", () => {
   });
 
   it("“用这张继续”的预填文案按契约拼接候选 url", () => {
-    expect(translate("zh-CN", "workbench.candidate.continueWith", { url: candidate(1).url })).toBe(
+    expect(translate("zh-CN", "workbench.candidate.continueWith", { url: candidate("1").url })).toBe(
       "我想基于这张继续修改：https://cdn.example.com/1.png",
     );
   });
 
   it("candidatesFromResult 过滤缺 url 的脏数据", () => {
-    const dirty = { candidates: [candidate(1), { asset_id: 9, label: "坏数据" }, null] } as unknown as AgentToolEvent["result"];
-    expect(candidatesFromResult(dirty)).toEqual([candidate(1)]);
+    const dirty = { candidates: [candidate("1"), { asset_id: "9", label: "坏数据" }, null] } as unknown as AgentToolEvent["result"];
+    expect(candidatesFromResult(dirty)).toEqual([candidate("1")]);
     expect(candidatesFromResult({})).toEqual([]);
   });
 });

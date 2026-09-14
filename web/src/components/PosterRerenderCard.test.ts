@@ -29,7 +29,7 @@ describe("PosterRerenderCard 成功形态", () => {
   it("展示下载链接与变更字段", () => {
     const result = {
       status: "ok",
-      poster_id: 12,
+      poster_id: "12",
       poster_kind: "moments",
       download_url: "/api/posters/12/download",
       changed_fields: ["title", "hashtags"],

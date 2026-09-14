@@ -10,7 +10,7 @@ function toolEvent(result: AgentToolEvent["result"]): AgentToolEvent {
 }
 
 const reportResult = {
-  report_id: 3,
+  report_id: "3",
   title: "国庆活动文案报告",
   download_url: "/api/agent/copy-reports/3/download",
   preview: "主标题：国庆大促\n副标题：全场八折",
@@ -50,7 +50,7 @@ describe("CopyReportCard 渲染内容", () => {
   it("title 缺省时回退到默认标题", () => {
     const html = renderToStaticMarkup(
       createElement(CopyReportCard, {
-        event: toolEvent({ report_id: 5, download_url: "/api/agent/copy-reports/5/download" }),
+        event: toolEvent({ report_id: "5", download_url: "/api/agent/copy-reports/5/download" }),
       }),
     );
     expect(html).toContain("文案报告");

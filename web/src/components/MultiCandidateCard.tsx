@@ -3,9 +3,9 @@ import { Loader2 } from "lucide-react";
 import type { AgentToolEvent } from "../lib/agentTypes";
 import { useI18n } from "../lib/preferences";
 
-/** generate_image tool_result 中的单张候选图（契约：asset_id / url / label）。 */
+/** generate_image tool_result 中的单张候选图（契约：asset_id / url / label，主键为 UUID 字符串）。 */
 export interface AgentCandidateImage {
-  asset_id: number;
+  asset_id: string;
   url: string;
   label: string;
 }
