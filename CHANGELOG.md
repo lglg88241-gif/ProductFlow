@@ -6,6 +6,12 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Product pipeline as agent tools (P2-10)**: the frozen product workflow is now
+  reachable conversationally — `run_product_pipeline` creates a product from a
+  library image and submits the full workflow (understanding → copy → image),
+  and `check_pipeline_status` reports run status, posters with download URLs,
+  and failure reasons. The workflow internals remain untouched (freeze upheld);
+  the agent is just a new entry point.
 - **Template-style generation (P2)**: `generate_image` accepts `template_asset_id`;
   the analyzed template profile (layout, palette, typography, copy slots, mood) is
   injected into the generation prompt so a selected/uploaded template can be replicated

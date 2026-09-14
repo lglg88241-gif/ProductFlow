@@ -141,6 +141,48 @@ def tool_schemas() -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "run_product_pipeline",
+                "description": (
+                    "商品批量流水线：用一张商品图自动跑完整工作流（商品理解→文案→生图），"
+                    "适合批量出全套素材。异步任务，提交后告知用户到商品页看进度，并可用 "
+                    "check_pipeline_status 查询结果。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product_name": {"type": "string", "description": "商品名称"},
+                        "library_asset_id": {
+                            "type": "string",
+                            "description": "素材库中作为商品主图的图片 id（用户上传的商品图）",
+                        },
+                        "category": {"type": "string", "description": "可选，商品类目"},
+                        "price": {"type": "string", "description": "可选，价格"},
+                        "canvas_template_key": {
+                            "type": "string",
+                            "description": "可选，画布模板 key（缺省用电商主图模板）",
+                        },
+                    },
+                    "required": ["product_name", "library_asset_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "check_pipeline_status",
+                "description": "查询商品流水线的执行状态与产出（运行状态/海报下载数量/失败原因）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product_id": {"type": "string", "description": "商品 id"},
+                    },
+                    "required": ["product_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "export_moments_grid",
                 "description": (
                     "把一张成品/素材切成朋友圈分格切片（九宫格等），返回 zip 下载链接。"
@@ -338,6 +380,10 @@ def execute_tool(
             return {"status": "completed", "message": "已存入素材库。", **_asset_summary(entry)}
         if name == "export_moments_grid":
             return _run_export_grid(db, agent_session, arguments)
+        if name == "run_product_pipeline":
+            return _run_product_pipeline(db, agent_session, arguments)
+        if name == "check_pipeline_status":
+            return _run_check_pipeline(db, arguments)
         if name == "recommend_designs":
             return _run_recommend_designs(db, llm, arguments)
         if name == "write_copy_report":
@@ -460,6 +506,95 @@ def _auto_tag_entry(db: Session, entry, llm: AgentLLMClient) -> None:
         db.refresh(entry)
     except Exception:  # noqa: BLE001 - 打标是增强能力，任何失败都不阻塞保存
         db.rollback()
+
+
+def _run_product_pipeline(db: Session, agent_session: AgentSession, arguments: dict[str, Any]) -> dict[str, Any]:
+    """商品批量流水线：复用冻结的商品工作流（agent 收编为入口，不改动其内部）。"""
+    from productflow_backend.application.product_workflow.execution import submit_product_workflow_run
+    from productflow_backend.application.use_cases import create_product
+    from productflow_backend.infrastructure.storage import LocalStorage
+
+    name = str(arguments.get("product_name", "")).strip()
+    library_asset_id = str(arguments.get("library_asset_id", "")).strip()
+    if not name:
+        return {"status": "error", "message": "商品名不能为空。"}
+    if not library_asset_id:
+        return {"status": "error", "message": "需要商品主图：请先上传商品图，或告诉我素材库里的图片。"}
+    try:
+        entry = get_asset_entry(db, library_asset_id)
+    except Exception:  # noqa: BLE001
+        return {"status": "error", "message": "素材库里找不到这张商品图，请确认后再试。"}
+
+    raw = LocalStorage().resolve(entry.storage_path).read_bytes()
+    product = create_product(
+        db,
+        name=name,
+        category=_optional_str_arg(arguments, "category"),
+        price=_optional_str_arg(arguments, "price"),
+        source_note=None,
+        image_bytes=raw,
+        filename=f"pipeline-{library_asset_id[:8]}.png",
+        content_type=entry.mime_type,
+        canvas_template_key=str(arguments.get("canvas_template_key") or "ecommerce-main-image-v1"),
+    )
+    workflow = submit_product_workflow_run(db, product_id=product.id)
+    latest_run = workflow.runs[0] if workflow.runs else None
+    return {
+        "status": "submitted",
+        "product_id": product.id,
+        "product_name": product.name,
+        "run_id": latest_run.id if latest_run else None,
+        "run_status": latest_run.status if latest_run else "queued",
+        "message": (
+            "商品流水线已启动（商品理解→文案→生图）。完成后用户可在商品页查看，"
+            "也可以稍后用 check_pipeline_status 查询结果。"
+        ),
+    }
+
+
+def _run_check_pipeline(db: Session, arguments: dict[str, Any]) -> dict[str, Any]:
+    from productflow_backend.application.product_workflows import get_product_workflow_status
+    from productflow_backend.application.use_cases import get_product_detail
+
+    product_id = str(arguments.get("product_id", "")).strip()
+    if not product_id:
+        return {"status": "error", "message": "缺少商品 id。"}
+    try:
+        product = get_product_detail(db, product_id)
+    except Exception:  # noqa: BLE001
+        return {"status": "error", "message": "找不到这个商品。"}
+
+    snapshot = get_product_workflow_status(db, product_id)
+    run = snapshot.runs[0] if snapshot.runs else None
+    run_status = run.status if run is not None else "未运行"
+    posters = [
+        {
+            "kind": str(variant.kind),
+            "download_url": f"/api/posters/{variant.id}/download",
+            "preview_url": f"/api/posters/{variant.id}/download?variant=preview",
+            "size": f"{variant.width}x{variant.height}",
+        }
+        for variant in product.poster_variants
+    ]
+    result: dict[str, Any] = {
+        "status": "completed",
+        "product_id": product.id,
+        "product_name": product.name,
+        "run_status": str(run_status),
+        "poster_count": len(posters),
+        "posters": posters[:4],
+    }
+    if run is not None and run.failure_reason:
+        result["failure_reason"] = str(run.failure_reason)[:200]
+    if product.copy_sets:
+        latest_copy = product.copy_sets[-1]
+        result["copy_confirmed"] = bool(getattr(latest_copy, "confirmed_at", None))
+    return result
+
+
+def _optional_str_arg(arguments: dict[str, Any], key: str) -> str | None:
+    value = str(arguments.get(key, "") or "").strip()
+    return value or None
 
 
 SUPPORTED_EXPORT_GRIDS = ("3x3", "2x2", "3x1", "1x3")

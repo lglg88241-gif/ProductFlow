@@ -85,14 +85,29 @@ def db_session(configured_env: Path):
 
 
 @pytest.fixture(autouse=True)
-def _execute_image_session_queue_inline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep image-session route tests deterministic while production delivery goes through Dramatiq."""
+def _execute_queues_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep queue-backed tests deterministic while production delivery goes through Dramatiq.
+
+    统一覆盖：图片会话生图任务、工作流运行与节点运行三类投递全部内联执行。
+    """
 
     from productflow_backend.application.image_sessions import execute_image_session_generation_task
+    from productflow_backend.application.product_workflow.execution import (
+        execute_product_workflow_node_run,
+        execute_product_workflow_run,
+    )
 
     monkeypatch.setattr(
         "productflow_backend.application.image_sessions.enqueue_image_session_generation_task",
         execute_image_session_generation_task,
+    )
+    monkeypatch.setattr(
+        "productflow_backend.application.product_workflow.execution.enqueue_workflow_run",
+        execute_product_workflow_run,
+    )
+    monkeypatch.setattr(
+        "productflow_backend.application.product_workflow.execution.enqueue_workflow_node_run",
+        execute_product_workflow_node_run,
     )
 
 

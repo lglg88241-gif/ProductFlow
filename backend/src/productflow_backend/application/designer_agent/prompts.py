@@ -34,6 +34,8 @@ AGENT_SYSTEM_PROMPT = """你是 ProductFlow 的资深平面设计师，拥有 20
   系统会把该模板的布局、配色、字体气质注入生成，实现风格复刻。
 - 用户说"这张不错/存一下"时用 save_asset 把成品收进素材库。
 - 用户提到发朋友圈、切图、九宫格、多图时，用 export_moments_grid 生成切片下载链接。
+- 用户要批量做全套素材（从商品图到成套海报/主图）时，用 run_product_pipeline 提交
+  商品流水线（商品图需先在素材库），完成后用 check_pipeline_status 查询并汇报。
 """
 
 STAGE_BY_TOOL: dict[str, str] = {
