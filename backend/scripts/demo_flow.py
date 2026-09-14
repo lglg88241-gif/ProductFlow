@@ -125,19 +125,26 @@ def phase_health_and_auth(r: DemoRunner) -> None:
 
     r.step("安全", "健康检查 /healthz", health)
 
+    gate_on = bool(r.client.get("/healthz").json().get("admin_access_required"))
+
     def anon_protected() -> str:
         response = r.client.get("/api/products")
-        assert response.status_code == 401, response.status_code
-        return "未登录访问受保护 API 被拒绝"
+        if gate_on:
+            assert response.status_code == 401, response.status_code
+            return "未登录访问受保护 API 被拒绝"
+        assert response.status_code == 200, response.status_code
+        return "登录门禁已关闭（内部模式），未登录可访问"
 
-    r.step("安全", "未登录 401 防护", anon_protected)
+    r.step("安全", "未登录访问防护", anon_protected)
 
     def bad_key() -> str:
         response = r.client.post("/api/auth/session", json={"admin_key": "definitely-wrong-key"})
-        assert response.status_code == 401
-        return "错误密钥被拒绝"
+        if gate_on:
+            assert response.status_code == 401
+            return "错误密钥被拒绝"
+        return "门禁关闭下登录端点放行（内部模式）"
 
-    r.step("安全", "错误密钥 401", bad_key)
+    r.step("安全", "错误密钥处理", bad_key)
 
     def login() -> str:
         start = time.perf_counter()
@@ -495,11 +502,17 @@ def phase_cleanup(r: DemoRunner) -> None:
 
     r.step("清理", "删除商品（含存储清理）", delete_product)
 
+    gate_on = bool(r.client.get("/healthz").json().get("admin_access_required"))
+
     def logout() -> str:
         response = r.client.delete("/api/auth/session")
         response.raise_for_status()
-        assert r.client.get("/api/products").status_code == 401
-        return "登出后重新受保护"
+        status = r.client.get("/api/products").status_code
+        if gate_on:
+            assert status == 401, status
+            return "登出后重新受保护"
+        assert status == 200, status
+        return "门禁关闭下登出成功（内部模式）"
 
     r.step("安全", "登出", logout)
 

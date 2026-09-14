@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from productflow_backend.application.asset_library import (
     analyze_asset,
     get_asset_entry,
+    list_asset_entries,
     register_generated_asset,
     search_asset_entries,
 )
@@ -399,6 +400,12 @@ def _run_recommend_designs(db: Session, llm: AgentLLMClient, arguments: dict[str
     if not requirement:
         return {"status": "error", "message": "推荐需求为空，先弄清楚用户想要什么。"}
     candidates = search_asset_entries(db, requirement, kind=arguments.get("kind"), limit=3)
+    if not candidates:
+        # 检索无命中：回落为素材库现有样板，避免推荐空手而归
+        template_kind = arguments.get("kind") or "template"
+        candidates = [
+            entry for entry in list_asset_entries(db, kind=template_kind) if entry.kind == "template"
+        ][:3]
     if not candidates:
         return {
             "status": "completed",
