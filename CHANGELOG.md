@@ -6,6 +6,14 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Streaming designer agent (P0)**: new SSE endpoint
+  `POST /api/agent/sessions/{id}/messages/stream` emits `stage` / `message` /
+  `tool_start` / `tool_result` / `error` / `done` frames; the workbench renders
+  them live (stage badge, inline copy proposals and image cards, per-message
+  stream) instead of a silent wait. LLM context now carries only the last 20
+  messages (truncated at the first complete tool-call group) to cut latency and
+  token cost. Tool-first guard: when the model replies without calling any tool
+  in the first round, a one-shot system nudge retries until tools are used.
 - **Env-first provider configuration**: `.env` is now the authoritative source for
   self-provided APIs — precedence is `.env` (`AGENT_*` / `IMAGE_*`) > UI bindings > mock.
   Relay-friendly: no capability gates, same-profile fallback allowed, defaults
