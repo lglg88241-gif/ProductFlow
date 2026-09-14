@@ -483,6 +483,59 @@ export const api = {
       body: JSON.stringify({ content }),
     });
   },
+  /** SSE 流式对话：每收到一帧调用 onEvent；流结束时 resolve 最后一个 done 帧。 */
+  async streamAgentMessage(
+    sessionId: string,
+    content: string,
+    onEvent: (event: string, data: Record<string, unknown>) => void,
+  ): Promise<Record<string, unknown> | null> {
+    const response = await fetch(toApiUrl(`/api/agent/sessions/${sessionId}/messages/stream`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ content }),
+    });
+    if (!response.ok || !response.body) {
+      let detail = `HTTP ${response.status}`;
+      try {
+        const payload = (await response.json()) as { detail?: string };
+        if (payload.detail) detail = payload.detail;
+      } catch {
+        /* 保留默认 detail */
+      }
+      throw new ApiError(response.status, detail);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let doneFrame: Record<string, unknown> | null = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        let event = "message";
+        let data: Record<string, unknown> = {};
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event: ")) event = line.slice(7);
+          else if (line.startsWith("data: ")) {
+            try {
+              data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+            } catch {
+              data = {};
+            }
+          }
+        }
+        if (event === "done") doneFrame = data;
+        onEvent(event, data);
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    return doneFrame;
+  },
   listAgentAssets(kind?: string): Promise<AgentAssetListResponse> {
     const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
     return request(`/api/agent/assets${query}`);

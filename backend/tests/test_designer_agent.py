@@ -191,3 +191,83 @@ def test_agent_reports_missing_real_text_provider(configured_env: Path) -> None:
     available, message = is_agent_llm_available()
     assert available is False
     assert "AGENT_*" in message
+
+
+def test_agent_message_stream_emits_sse_frames(configured_env: Path, install_scripted_llm) -> None:
+    """SSE 流式端点：帧序列、事件类型与最终 done 数据。"""
+    from productflow_backend.presentation.api import create_app
+
+    install_scripted_llm(
+        [
+            AgentLLMResponse(
+                content=None,
+                tool_calls=[
+                    AgentToolCall(
+                        call_id="call-stream-1",
+                        name="generate_image",
+                        arguments={"prompt": "粉色开业海报", "size": "1024x1024"},
+                    )
+                ],
+            ),
+            AgentLLMResponse(content="图片已经生成好了！"),
+        ]
+    )
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+
+    created = client.post("/api/agent/sessions", json={"title": "流式"})
+    session_id = created.json()["id"]
+
+    with client.stream(
+        "POST",
+        f"/api/agent/sessions/{session_id}/messages/stream",
+        json={"content": "来一张粉色开业海报"},
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        body = "".join(response.iter_text())
+
+    events: list[tuple[str, dict]] = []
+    for block in body.strip().split("\n\n"):
+        lines = block.split("\n")
+        event = next(line[len("event: ") :] for line in lines if line.startswith("event: "))
+        data = json.loads(next(line[len("data: ") :] for line in lines if line.startswith("data: ")))
+        events.append((event, data))
+
+    kinds = [event for event, _ in events]
+    assert kinds[0] == "message"  # user 落库帧
+    assert kinds.count("stage") >= 2
+    assert "tool_start" in kinds and "tool_result" in kinds
+    assistant_frames = [data for event, data in events if event == "message" and data["role"] == "assistant"]
+    assert assistant_frames and "生成好" in assistant_frames[-1]["content"]
+    done = next(data for event, data in events if event == "done")
+    assert done["stage"] == "review"
+    assert done["image_session_id"]
+    assert any(event["tool"] == "generate_image" for event in done["tool_events"])
+
+    # 流结束后会话详情与非流式路径一致
+    detail = client.get(f"/api/agent/sessions/{session_id}").json()
+    assert detail["stage"] == "review"
+    assert [m["role"] for m in detail["messages"]] == ["user", "assistant", "tool", "assistant"]
+
+
+def test_agent_message_stream_reports_llm_error(configured_env: Path) -> None:
+    """文本供应商为 mock 时，流式端点输出人话 error 帧并正常收尾。"""
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+    session_id = client.post("/api/agent/sessions", json={}).json()["id"]
+
+    with client.stream(
+        "POST",
+        f"/api/agent/sessions/{session_id}/messages/stream",
+        json={"content": "你好"},
+    ) as response:
+        body = "".join(response.iter_text())
+
+    assert "event: error" in body
+    assert "AGENT_*" in body
+    assert "event: done" in body

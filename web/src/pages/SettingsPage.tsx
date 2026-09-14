@@ -1684,12 +1684,6 @@ interface ImageBindingSectionProps {
 
 function ImageBindingSection({ data, draft, pending, onChange, onSave }: ImageBindingSectionProps) {
   const { t } = useI18n();
-  const requiredCapability =
-    draft.provider_kind === "openai_responses"
-      ? "image_responses"
-      : draft.provider_kind === "google_gemini_image"
-        ? "image_google_gemini"
-        : "image_images";
   const profiles = (data?.profiles ?? []).filter(
     (profile) => profile.enabled && !profile.archived_at,
   );

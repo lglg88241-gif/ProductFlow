@@ -249,7 +249,10 @@ def test_ui_binding_overridden_by_env_variables(
     assert resolved.api_key == "env-key"
 
 
-def test_image_env_variables_take_precedence_over_ui_binding(configured_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_image_env_variables_take_precedence_over_ui_binding(
+    configured_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """生图绑定保持 mock 时，.env 的 IMAGE_* 直读生效（中转 gpt-image-2 场景）。"""
     monkeypatch.setenv("IMAGE_PROVIDER_KIND", "openai_images")
     monkeypatch.setenv("IMAGE_API_KEY", "relay-image-key")

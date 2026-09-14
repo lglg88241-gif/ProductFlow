@@ -3,11 +3,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Paperclip, Plus, Send } from "lucide-react";
 
 import { TopNav } from "../components/TopNav";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import type {
   AgentAssetEntry,
   AgentCopyReport,
   AgentDesignRecommendation,
+  AgentMessage,
   AgentSessionDetail,
   AgentToolEvent,
 } from "../lib/agentTypes";
@@ -213,13 +214,58 @@ export function WorkbenchPage() {
     (task) => task.status === "queued" || task.status === "running",
   );
 
-  const sendMutation = useMutation({
-    mutationFn: (content: string) => api.sendAgentMessage(activeSessionId as string, content),
-    onSuccess: () => {
+  const [streaming, setStreaming] = useState(false);
+  const [streamStage, setStreamStage] = useState<string | null>(null);
+  const [streamMessages, setStreamMessages] = useState<AgentMessage[]>([]);
+  const [streamToolEvents, setStreamToolEvents] = useState<AgentToolEvent[]>([]);
+  const [streamError, setStreamError] = useState<string | null>(null);
+
+  const resetStreamState = () => {
+    setStreamStage(null);
+    setStreamMessages([]);
+    setStreamToolEvents([]);
+    setStreamError(null);
+  };
+
+  const sendAgentMessage = async (content: string) => {
+    if (activeSessionId == null || streaming) return;
+    setStreaming(true);
+    resetStreamState();
+    try {
+      await api.streamAgentMessage(activeSessionId, content, (event, data) => {
+        if (event === "stage") {
+          setStreamStage((data.stage as string) ?? null);
+        } else if (event === "message") {
+          setStreamMessages((prev) => [
+            ...prev,
+            {
+              id: (data.id as string) ?? "",
+              role: (data.role as AgentMessage["role"]) ?? "assistant",
+              content: (data.content as string) ?? "",
+              tool_name: null,
+              image_session_id: null,
+              created_at: "",
+            },
+          ]);
+        } else if (event === "tool_result") {
+          setStreamToolEvents((prev) => [
+            ...prev,
+            { tool: (data.tool as string) ?? "", result: (data.result ?? {}) as AgentToolEvent["result"] },
+          ]);
+        } else if (event === "error") {
+          setStreamError((data.message as string) ?? null);
+        }
+      });
+    } catch (error) {
+      setStreamError(error instanceof ApiError ? error.detail : String(error));
+    } finally {
+      setStreaming(false);
       void detailQuery.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["agent-sessions"] });
       if (detail?.image_session_id) void imageSessionQuery.refetch();
-    },
-  });
+      if (detail?.image_session_id) void queryClient.invalidateQueries({ queryKey: ["agent-image-session", detail.image_session_id] });
+    }
+  };
 
   const assetsQuery = useQuery({ queryKey: ["agent-assets"], queryFn: () => api.listAgentAssets() });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -246,13 +292,13 @@ export function WorkbenchPage() {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [detail?.messages.length, sendMutation.isPending]);
+  }, [detail?.messages.length, streamMessages.length, streaming]);
 
   const submit = () => {
     const content = draft.trim();
-    if (!content || activeSessionId == null || sendMutation.isPending) return;
+    if (!content || activeSessionId == null || streaming) return;
     setDraft("");
-    sendMutation.mutate(content);
+    void sendAgentMessage(content);
   };
 
   const rounds: ImageSessionRound[] = imageSessionQuery.data?.rounds ?? [];
@@ -332,19 +378,44 @@ export function WorkbenchPage() {
                   </div>
                 </div>
               ))}
-            {sendMutation.isPending ? (
-              <div className="flex items-center gap-2 text-sm text-slate-500">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                {t("workbench.working")}
+            {(streamMessages ?? []).map((message) => (
+              <div
+                key={`stream-${message.id}`}
+                className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+              >
+                <div
+                  className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ${
+                    message.role === "user"
+                      ? "bg-slate-900 text-white"
+                      : "border border-slate-200 bg-white text-slate-800"
+                  }`}
+                >
+                  {message.content}
+                </div>
+              </div>
+            ))}
+            {streaming ? (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2 text-sm text-slate-500">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  {streamStage
+                    ? t(STAGE_LABEL_KEYS[streamStage] ?? "workbench.stage.clarify") + " · " + t("workbench.working")
+                    : t("workbench.working")}
+                </div>
+                {streamToolEvents.map((event, index) => (
+                  <ToolEventCard
+                    key={`stream-event-${index}`}
+                    event={event}
+                    onPick={(message: string) => void sendAgentMessage(message)}
+                  />
+                ))}
               </div>
             ) : null}
-            {(sendMutation.data?.tool_events ?? []).map((event, index) => (
-              <ToolEventCard
-                key={`event-${index}`}
-                event={event}
-                onPick={(message: string) => sendMutation.mutate(message)}
-              />
-            ))}
+            {streamError ? (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                {streamError}
+              </div>
+            ) : null}
             {rounds.length > 0 ? (
               <div className="rounded-xl border border-slate-200 bg-white p-3">
                 <p className="mb-2 text-xs font-medium text-slate-500">{t("workbench.latestOutputs")}</p>
@@ -426,7 +497,7 @@ export function WorkbenchPage() {
               <button
                 type="button"
                 onClick={submit}
-                disabled={!draft.trim() || activeSessionId == null || sendMutation.isPending}
+                disabled={!draft.trim() || activeSessionId == null || streaming}
                 className="flex items-center gap-1 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40"
               >
                 <Send className="h-4 w-4" />

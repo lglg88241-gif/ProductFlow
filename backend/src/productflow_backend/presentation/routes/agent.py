@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
@@ -17,6 +19,7 @@ from productflow_backend.application.designer_agent.loop import (
     get_agent_session,
     list_agent_sessions,
     run_agent_turn,
+    run_agent_turn_events,
 )
 from productflow_backend.domain.errors import BusinessError
 from productflow_backend.presentation.deps import get_session, require_admin, require_deletion_enabled
@@ -199,3 +202,40 @@ def send_agent_message_endpoint(
             for task in result.pending_generation_tasks
         ],
     )
+
+
+@router.post(
+    "/sessions/{agent_session_id}/messages/stream",
+    responses={200: {"content": {"text/event-stream": {}}}},
+)
+def send_agent_message_stream_endpoint(
+    agent_session_id: str,
+    payload: AgentTurnRequest,
+    session: Session = Depends(get_session),
+) -> Generator[str, None, None]:
+    """SSE 流式对话：stage / message / tool_start / tool_result / error / done 帧。"""
+
+    import json as _json
+
+    def _frame(event: str, data: dict) -> str:
+        payload = _json.dumps(data, ensure_ascii=False)
+        return "event: " + event + "\ndata: " + payload + "\n\n"
+
+    from fastapi.responses import StreamingResponse
+
+    def _generate() -> Generator[str, None, None]:
+        try:
+            events = run_agent_turn_events(session, agent_session_id=agent_session_id, user_content=payload.content)
+            for event in events:
+                yield _frame(event["event"], event["data"])
+        except (BusinessError, AgentLLMError, ValueError) as exc:
+            yield _frame("error", {"message": str(exc)})
+            yield _frame("done", {"session_id": agent_session_id, "stage": "", "image_session_id": None,
+                                  "tool_events": [], "pending_generation_tasks": []})
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
