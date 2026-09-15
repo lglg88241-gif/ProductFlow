@@ -361,3 +361,44 @@ def test_primary_only_when_no_fallback_configured(configured_env, monkeypatch) -
     client = build_agent_llm_client()
     assert isinstance(client, OpenAICompatAgentClient)
     assert not isinstance(client, FallbackAgentLLMClient)
+
+
+def test_transient_retry_uses_exponential_backoff_with_jitter() -> None:
+    """中转站 502 突发的对策：退避必须递增且带抖动（固定短延迟会一直撞在坏窗口里）。"""
+    from productflow_backend.application.designer_agent.llm import TransientRetryPolicy
+
+    policy = TransientRetryPolicy(max_retries=3, base_delay_seconds=2.0)
+    first, second, third = policy.delay_for(0), policy.delay_for(1), policy.delay_for(2)
+    # 指数递增：base*1, base*2, base*4（各加 0~base 抖动）
+    assert 2 <= first <= 4
+    assert 4 <= second <= 6
+    assert 8 <= third <= 10
+    # 抖动存在：同一 attempt 多次取值不应完全相同
+    assert len({policy.delay_for(1) for _ in range(8)}) > 1, "退避缺少抖动，并发重试会同时冲击中转站"
+
+
+def test_transient_gateway_errors_are_retryable_but_4xx_are_not() -> None:
+    """502/503 等网关错误可重试；404（模型不存在）与超时不重试。"""
+    from productflow_backend.application.designer_agent.llm import _is_transient_llm_error
+
+    class _Err(Exception):
+        def __init__(self, status: int) -> None:
+            super().__init__(f"HTTP {status}")
+            self.status_code = status
+
+    assert _is_transient_llm_error(_Err(502))
+    assert _is_transient_llm_error(_Err(503))
+    assert not _is_transient_llm_error(_Err(404))
+    assert not _is_transient_llm_error(_Err(400))
+
+
+def test_retry_budget_is_configurable(configured_env, monkeypatch) -> None:
+    """重试预算可由环境变量调整（中转站不稳定时运维可加大耐心）。"""
+    from productflow_backend.config import get_settings
+
+    monkeypatch.setenv("AGENT_LLM_TRANSIENT_RETRIES", "5")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().agent_llm_transient_retries == 5
+    finally:
+        get_settings.cache_clear()

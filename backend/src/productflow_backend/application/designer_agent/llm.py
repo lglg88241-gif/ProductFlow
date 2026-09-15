@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass, field, replace
@@ -31,8 +32,28 @@ class AgentLLMError(RuntimeError):
 
 
 # 中转站常见的瞬时故障（网关 5xx / 连接类）重试一次；超时不重试，避免等待翻倍
-AGENT_LLM_TRANSIENT_RETRIES = 1
-AGENT_LLM_RETRY_DELAY_SECONDS = 2.0
+# 瞬时故障重试的默认策略；实际取值由 build_agent_llm_client 从 Settings 注入，
+# 客户端本身不读全局配置（否则单独构造客户端就得备齐 DATABASE_URL 等全部环境）。
+DEFAULT_TRANSIENT_RETRIES = 3
+DEFAULT_RETRY_BASE_DELAY_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class TransientRetryPolicy:
+    """指数退避 + 抖动。
+
+    中转站过载时表现为 502 突发（实测同一时刻单发探测 200、连续调用 502），
+    固定短延迟重试会正好落在坏窗口里；指数退避把重试摊到更长的时间轴上，
+    抖动避免多个并发 turn 同时重试形成二次冲击。
+    """
+
+    max_retries: int = DEFAULT_TRANSIENT_RETRIES
+    base_delay_seconds: float = DEFAULT_RETRY_BASE_DELAY_SECONDS
+
+    def delay_for(self, attempt: int) -> float:
+        return self.base_delay_seconds * (2**attempt) + random.uniform(0, self.base_delay_seconds)
+
+
 _TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 520, 521, 522, 523, 524}
 
 
@@ -118,9 +139,18 @@ class AgentLLMClient(Protocol):
 class OpenAICompatAgentClient:
     """OpenAI 兼容 chat-completions 客户端，连接配置复用 text 供应商档案。"""
 
-    def __init__(self, *, provider_name: str, api_key: str, base_url: str | None, model: str) -> None:
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        api_key: str,
+        base_url: str | None,
+        model: str,
+        retry_policy: TransientRetryPolicy | None = None,
+    ) -> None:
         self.provider_name = provider_name
         self.model = model
+        self.retry_policy = retry_policy or TransientRetryPolicy()
         # 保留地址便于诊断（降级切换/排障时需要知道实际打的是哪个中转站）
         self.base_url = base_url
         cache_key = (api_key, base_url or None, _AGENT_LLM_TIMEOUT_SECONDS)
@@ -140,7 +170,8 @@ class OpenAICompatAgentClient:
         started = time.perf_counter()
         response = None
         last_exc: Exception | None = None
-        for attempt in range(AGENT_LLM_TRANSIENT_RETRIES + 1):
+        max_retries = self.retry_policy.max_retries
+        for attempt in range(max_retries + 1):
             try:
                 response = self._client.chat.completions.create(
                     model=self.model,
@@ -151,12 +182,17 @@ class OpenAICompatAgentClient:
                 break
             except Exception as exc:  # noqa: BLE001 - 供应商异常统一转译为 AgentLLMError
                 last_exc = exc
-                if not _is_transient_llm_error(exc) or attempt >= AGENT_LLM_TRANSIENT_RETRIES:
+                if not _is_transient_llm_error(exc) or attempt >= max_retries:
                     raise AgentLLMError(f"设计师模型调用失败: {exc}") from exc
+                delay = self.retry_policy.delay_for(attempt)
                 logger.warning(
-                    "设计师模型瞬时故障，重试: attempt=%s error=%s", attempt + 1, type(exc).__name__
+                    "设计师模型瞬时故障，重试: attempt=%s/%s error=%s delay_s=%.1f",
+                    attempt + 1,
+                    max_retries,
+                    type(exc).__name__,
+                    delay,
                 )
-                time.sleep(AGENT_LLM_RETRY_DELAY_SECONDS)
+                time.sleep(delay)
         if response is None:
             raise AgentLLMError(f"设计师模型调用失败: {last_exc}") from last_exc
         choice = response.choices[0].message
@@ -216,6 +252,13 @@ class FallbackAgentLLMClient:
 
 def build_agent_llm_client() -> AgentLLMClient:
     """按 agent 供应商绑定解析连接配置：主供应商 + 可选降级；mock 绑定明确报错。"""
+    from productflow_backend.config import get_settings
+
+    settings = get_settings()
+    retry_policy = TransientRetryPolicy(
+        max_retries=settings.agent_llm_transient_retries,
+        base_delay_seconds=settings.agent_llm_retry_base_delay_seconds,
+    )
     config = resolve_agent_provider_config()
     if config.provider_kind == "mock":
         raise AgentLLMError(
@@ -228,6 +271,7 @@ def build_agent_llm_client() -> AgentLLMClient:
         api_key=config.api_key,
         base_url=config.base_url,
         model=config.model,
+        retry_policy=retry_policy,
     )
     # 降级是否可用看"有没有 key + 模型"，不能看 fallback_provider_profile_id：
     # 后者只在界面绑定路径产生，.env 直填（中转场景）永远拿不到它——
@@ -243,5 +287,6 @@ def build_agent_llm_client() -> AgentLLMClient:
         # 避免静默落到默认公网地址。
         base_url=config.fallback_base_url or config.base_url,
         model=config.fallback_model,
+        retry_policy=retry_policy,
     )
     return FallbackAgentLLMClient(primary=primary, fallback=fallback)

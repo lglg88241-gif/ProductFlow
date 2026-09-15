@@ -232,6 +232,10 @@ class Settings(BaseSettings):
     )
     admin_access_required: bool = True
     deletion_enabled: bool = False
+    # 设计师模型瞬时故障（中转站 502 突发）的重试预算：指数退避 + 抖动。
+    # 实测中转站过载时，同一时刻单发探测 200 而连续调用 502，故用退避把重试摊到更长的时间轴。
+    agent_llm_transient_retries: int = Field(default=3, ge=0, le=10)
+    agent_llm_retry_base_delay_seconds: float = Field(default=1.0, gt=0, le=60)
 
     @field_validator("image_main_image_size", "image_promo_poster_size")
     @classmethod
