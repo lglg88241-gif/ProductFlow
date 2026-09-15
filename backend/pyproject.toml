@@ -6,6 +6,7 @@ readme = { text = "Backend API for ProductFlow.", content-type = "text/markdown"
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.16.5",
+  "argon2-cffi>=23.1.0",
   "dramatiq[redis]>=1.18.0",
   "fastapi>=0.115.12",
   "google-genai>=2.2.0",

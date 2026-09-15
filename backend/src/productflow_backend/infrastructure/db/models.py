@@ -119,12 +119,19 @@ class UserCanvasTemplate(Base, TimestampMixin):
 
 class Product(Base, TimestampMixin):
     __tablename__ = "products"
+    __table_args__ = (Index("ix_products_owner_id", "owner_id"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(255))
     category: Mapped[str | None] = mapped_column(String(120), nullable=True)
     price: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     source_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 批次 B（纯新增）：数据归属，可空、不回填；归属过滤在后续批次启用
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_products_owner_id"),
+        nullable=True,
+    )
     current_confirmed_copy_set_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey(
@@ -413,10 +420,19 @@ class ImageSession(Base, TimestampMixin):
 
     __tablename__ = "image_sessions"
     # 列表按 updated_at 降序分页
-    __table_args__ = (Index("ix_image_sessions_updated_at", "updated_at"),)
+    __table_args__ = (
+        Index("ix_image_sessions_updated_at", "updated_at"),
+        Index("ix_image_sessions_owner_id", "owner_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     title: Mapped[str] = mapped_column(String(255))
+    # 批次 B（纯新增）：数据归属，可空、不回填；归属过滤在后续批次启用
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_image_sessions_owner_id"),
+        nullable=True,
+    )
 
     assets: Mapped[list[ImageSessionAsset]] = relationship(
         back_populates="session",
@@ -607,7 +623,10 @@ class AgentSession(Base):
 
     __tablename__ = "agent_sessions"
     # 会话列表按 updated_at 降序排序
-    __table_args__ = (Index("ix_agent_sessions_updated_at", "updated_at"),)
+    __table_args__ = (
+        Index("ix_agent_sessions_updated_at", "updated_at"),
+        Index("ix_agent_sessions_owner_id", "owner_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     title: Mapped[str] = mapped_column(String(120), default="设计师会话")
@@ -615,6 +634,12 @@ class AgentSession(Base):
     image_session_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("image_sessions.id", ondelete="SET NULL", name="fk_agent_sessions_image_session_id"),
+        nullable=True,
+    )
+    # 批次 B（纯新增）：数据归属，可空、不回填；归属过滤在后续批次启用
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_agent_sessions_owner_id"),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -668,6 +693,7 @@ class AssetLibraryEntry(Base):
         ),
         CheckConstraint("source IN ('upload', 'generated', 'builtin')", name="ck_asset_library_source"),
         Index("ix_asset_library_kind_created", "kind", "created_at"),
+        Index("ix_asset_library_owner_id", "owner_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -682,6 +708,12 @@ class AssetLibraryEntry(Base):
     template_profile_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     agent_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     image_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # 批次 B（纯新增）：数据归属，可空、不回填；归属过滤在后续批次启用
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_asset_library_owner_id"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -694,6 +726,7 @@ class CopyReport(Base):
         Index("ix_copy_reports_agent_session_created", "agent_session_id", "created_at"),
         # 报告列表不按会话过滤时按 created_at 降序排序
         Index("ix_copy_reports_created_at", "created_at"),
+        Index("ix_copy_reports_owner_id", "owner_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -704,4 +737,64 @@ class CopyReport(Base):
     )
     title: Mapped[str] = mapped_column(String(255))
     content_md: Mapped[str] = mapped_column(Text)
+    # 批次 B（纯新增）：数据归属，可空、不回填；归属过滤在后续批次启用
+    owner_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL", name="fk_copy_reports_owner_id"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserAccount(Base):
+    """独立账号（批次 B 第一批，纯新增）：与现有 admin-key 门禁并存的本地用户身份。"""
+
+    __tablename__ = "users"
+    __table_args__ = (Index("uq_users_username", "username", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    username: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 只存 argon2id 哈希，永不存明文
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), default="member", nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserInvite(Base):
+    """管理员一次性邀请：明文 token 只出现一次，库中只存 sha256。"""
+
+    __tablename__ = "user_invites"
+    __table_args__ = (Index("uq_user_invites_token_hash", "token_hash", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 创建者标识（现有 admin-key 管理员没有 users.id，故不设外键，存用户名或标识）
+    created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UserSession(Base):
+    """独立账号的服务端会话：可吊销、带闲置/绝对双过期，cookie 只持有明文 token。"""
+
+    __tablename__ = "user_sessions"
+    __table_args__ = (Index("uq_user_sessions_token_hash", "token_hash", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE", name="fk_user_sessions_user_id"),
+        nullable=False,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    absolute_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    idle_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

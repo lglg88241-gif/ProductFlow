@@ -179,6 +179,14 @@ services:
     depends_on:
       productflow-backend:
         condition: service_healthy
+    healthcheck:
+      # worker 活性自检（审计 O3）：worker 进程每 30s 向 Redis 写 pf:worker:heartbeat（TTL 120s），
+      # 键存在即未过期。redis 包由 dramatiq[redis] 带入，worker 镜像内可用。
+      test: ["CMD", "python", "-c", "import os,redis,sys;r=redis.Redis.from_url(os.environ['REDIS_URL']);sys.exit(0 if r.get('pf:worker:heartbeat') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   productflow-web:
     build:

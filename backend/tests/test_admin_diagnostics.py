@@ -62,10 +62,15 @@ def test_admin_diagnostics_reports_each_probe_independently(
         "db_reachable",
         "redis_reachable",
         "alembic_version",
+        # 审计 O3：worker 心跳字段（Redis 故障 → 年龄 null / 存活 False）
+        "worker_heartbeat_age_seconds",
+        "worker_heartbeat_alive",
     }
     assert payload["app_version"] == __version__
     assert payload["db_reachable"] is True
     assert payload["redis_reachable"] is False
+    assert payload["worker_heartbeat_age_seconds"] is None
+    assert payload["worker_heartbeat_alive"] is False
     # 测试库用 Base.metadata.create_all 建表，没有 alembic_version → null
     assert payload["alembic_version"] is None
     providers = payload["providers"]

@@ -351,6 +351,21 @@ entry_rate_limiter = EntryRateLimiter(
     key_namespace="auth-entry",
 )
 
+# 用户账号入口（批次 B）：用户登录与邀请兑换的独立入口限速，避免与 admin 入口互相挤占
+user_login_entry_rate_limiter = EntryRateLimiter(
+    limit=_entry_limit_from_env(),
+    window_seconds=_ENTRY_WINDOW_SECONDS,
+    too_many_message="登录请求过于频繁，请稍后再试",
+    key_namespace="user-login-entry",
+)
+
+user_redeem_entry_rate_limiter = EntryRateLimiter(
+    limit=_entry_limit_from_env(),
+    window_seconds=_ENTRY_WINDOW_SECONDS,
+    too_many_message="兑换请求过于频繁，请稍后再试",
+    key_namespace="user-redeem-entry",
+)
+
 
 def reset_all_rate_limiters() -> None:
     """测试专用：重置全部模块级限速器状态与惰性后端解析。
@@ -359,5 +374,11 @@ def reset_all_rate_limiters() -> None:
     （由注入它的测试自己负责），也不发起任何存储连接——teardown 阶段 env 可能
     已指向不可用的 Redis，此时绝不能再去连接。
     """
-    for limiter in (login_rate_limiter, settings_unlock_rate_limiter, entry_rate_limiter):
+    for limiter in (
+        login_rate_limiter,
+        settings_unlock_rate_limiter,
+        entry_rate_limiter,
+        user_login_entry_rate_limiter,
+        user_redeem_entry_rate_limiter,
+    ):
         limiter.reset_backend_resolution()

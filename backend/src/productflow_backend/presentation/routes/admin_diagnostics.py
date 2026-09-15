@@ -8,7 +8,9 @@ healthz 已收敛为最小存活探针（不暴露任何可被未鉴权方侦察
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import UTC, datetime
 
 import redis as redis_lib
 from fastapi import APIRouter, Depends
@@ -29,16 +31,26 @@ router = APIRouter(prefix="/api/admin", tags=["admin-diagnostics"], dependencies
 
 _REDIS_PROBE_TIMEOUT_SECONDS = 2.0
 
+# worker 心跳（审计 O3）：键名/阈值镜像 workers.py 的 WORKER_HEARTBEAT_KEY /
+# WORKER_HEARTBEAT_TTL_SECONDS。这里刻意不 import workers（该模块导入即初始化
+# Dramatiq Broker），改动心跳语义时需同步两处。
+_WORKER_HEARTBEAT_KEY = "pf:worker:heartbeat"
+_WORKER_HEARTBEAT_STALE_SECONDS = 120.0
+
 
 @router.get("/diagnostics")
 def diagnostics(session: Session = Depends(get_session)) -> dict[str, object]:
     """运行环境诊断摘要（管理员专用）。"""
+    worker_heartbeat_age = _worker_heartbeat_age_seconds()
     return {
         "app_version": __version__,
         "providers": _provider_status_summary(),
         "db_reachable": _db_reachable(session),
         "redis_reachable": _redis_reachable(),
         "alembic_version": _alembic_version(session),
+        "worker_heartbeat_age_seconds": worker_heartbeat_age,
+        "worker_heartbeat_alive": worker_heartbeat_age is not None
+        and worker_heartbeat_age < _WORKER_HEARTBEAT_STALE_SECONDS,
     }
 
 
@@ -98,3 +110,30 @@ def _alembic_version(session: Session) -> str | None:
         # 典型场景：测试库用 create_all 建表、或迁移尚未执行。
         return None
     return str(row) if row is not None else None
+
+
+def _worker_heartbeat_age_seconds() -> float | None:
+    """worker 心跳键的年龄（秒）。
+
+    键不存在（worker 死透/从未启动）、心跳内容损坏或 Redis 不可达 → None，
+    只降级该子项，不影响端点。
+    """
+    settings = get_settings()
+    try:
+        client = redis_lib.Redis.from_url(
+            settings.redis_url,
+            socket_connect_timeout=_REDIS_PROBE_TIMEOUT_SECONDS,
+            socket_timeout=_REDIS_PROBE_TIMEOUT_SECONDS,
+        )
+        raw = client.get(_WORKER_HEARTBEAT_KEY)
+        if raw is None:
+            return None
+        payload = json.loads(raw)
+        heartbeat_ts = datetime.fromisoformat(str(payload["ts"]))
+        if heartbeat_ts.tzinfo is None:
+            heartbeat_ts = heartbeat_ts.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - heartbeat_ts).total_seconds()
+    except Exception:  # noqa: BLE001 - 心跳探测失败只降级该子项
+        logger.warning("诊断探测：worker 心跳不可读", exc_info=True)
+        return None
+    return age

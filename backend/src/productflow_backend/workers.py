@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import dramatiq
+
+if TYPE_CHECKING:
+    from redis import Redis
 
 from productflow_backend.application.image_sessions import execute_image_session_generation_task
 from productflow_backend.application.product_workflows import (
@@ -47,6 +53,14 @@ DEFAULT_RECONCILE_INTERVAL_SECONDS = 1800
 # 存储生命周期清理间隔（秒）：只清无 DB 引用的孤儿文件与过期导出，默认每天一次
 DEFAULT_STORAGE_CLEANUP_INTERVAL_SECONDS = 86400
 DEFAULT_STORAGE_CLEANUP_INITIAL_DELAY_SECONDS = 600
+
+# worker 心跳（审计 O3）：每 30s 向 Redis 写一次活性键，TTL 120s。
+# 消费方：docker-compose worker healthcheck 与管理员诊断端点
+# （presentation/routes/admin_diagnostics.py，为避免 import workers 带来的
+# broker 初始化副作用，键名/阈值在该文件内以常量镜像，改动需同步）。
+WORKER_HEARTBEAT_KEY = "pf:worker:heartbeat"
+WORKER_HEARTBEAT_INTERVAL_SECONDS = 30
+WORKER_HEARTBEAT_TTL_SECONDS = 120
 
 
 def get_image_session_worker_failsafe_time_limit_ms() -> int:
@@ -195,9 +209,90 @@ def start_storage_cleanup_daemon() -> threading.Thread:
     return thread
 
 
+def _new_heartbeat_redis_client() -> Redis:
+    """为心跳建独立 Redis 连接（不与 Dramatiq Broker 共用）。失败由调用方兜底。"""
+    import redis as redis_lib
+
+    from productflow_backend.config import get_settings
+
+    settings = get_settings()
+    return redis_lib.Redis.from_url(
+        settings.redis_url,
+        socket_connect_timeout=2.0,
+        socket_timeout=2.0,
+    )
+
+
+def _new_heartbeat_redis_client_safely() -> Redis | None:
+    try:
+        return _new_heartbeat_redis_client()
+    except Exception:
+        logger.exception("worker 心跳：构造 Redis 客户端失败")
+        return None
+
+
+def write_worker_heartbeat(redis_client: Redis | None = None, *, now: datetime | None = None) -> bool:
+    """写一次 worker 心跳：SET pf:worker:heartbeat {"ts": iso, "pid": pid}，TTL 120s。
+
+    redis 客户端可注入（测试用 fake）；缺省时按 settings.redis_url 新建独立连接。
+    失败只记日志并返回 False，绝不影响 worker 主流程。
+    """
+    client = redis_client if redis_client is not None else _new_heartbeat_redis_client_safely()
+    if client is None:
+        return False
+    timestamp = (now or datetime.now(UTC)).isoformat()
+    payload = json.dumps({"ts": timestamp, "pid": os.getpid()}, ensure_ascii=False)
+    try:
+        client.set(WORKER_HEARTBEAT_KEY, payload, ex=WORKER_HEARTBEAT_TTL_SECONDS)
+    except Exception:
+        logger.exception("worker 心跳写入失败")
+        return False
+    return True
+
+
+def run_worker_heartbeat_loop(
+    redis_client: Redis | None = None,
+    *,
+    interval_seconds: float | None = None,
+    stop_event: threading.Event | None = None,
+) -> None:
+    """心跳循环：启动即写一次，之后每 interval 一次，直到 stop_event 置位。
+
+    Redis 不可达时每个间隔重试（客户端按需重建），写入失败不打断循环。
+    """
+    resolved_interval = interval_seconds if interval_seconds is not None else WORKER_HEARTBEAT_INTERVAL_SECONDS
+    stop = stop_event or threading.Event()
+    client = redis_client
+    while not stop.is_set():
+        if client is None:
+            client = _new_heartbeat_redis_client_safely()
+        if client is not None:
+            write_worker_heartbeat(client)
+        if stop.wait(timeout=resolved_interval):
+            return
+
+
+def start_worker_heartbeat_daemon(
+    redis_client: Redis | None = None,
+    *,
+    stop_event: threading.Event | None = None,
+) -> threading.Thread:
+    """worker 启动时开启心跳 daemon 线程（独立 Redis 连接，失败不影响 worker）。"""
+    thread = threading.Thread(
+        target=run_worker_heartbeat_loop,
+        args=(redis_client,),
+        kwargs={"stop_event": stop_event},
+        name="worker-heartbeat",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 if _running_under_dramatiq_cli():
     cleanup_old_logs()
     recover_unfinished_workflow_runs(reset_stale_running=True)
     recover_unfinished_image_session_generation_tasks(reset_stale_running=True)
     start_queue_reconcile_daemon()
     start_storage_cleanup_daemon()
+    start_worker_heartbeat_daemon()

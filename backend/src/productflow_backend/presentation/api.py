@@ -38,6 +38,7 @@ from productflow_backend.presentation.routes.metrics import router as metrics_ro
 from productflow_backend.presentation.routes.product_workflows import router as product_workflows_router
 from productflow_backend.presentation.routes.products import router as products_router
 from productflow_backend.presentation.routes.settings import router as settings_router
+from productflow_backend.presentation.routes.user_auth import router as user_auth_router
 from productflow_backend.presentation.session import ClockStableSessionMiddleware
 
 REQUEST_ID_HEADER = b"x-request-id"
@@ -111,6 +112,7 @@ def create_app() -> FastAPI:
     app.include_router(agent_router)
     app.include_router(admin_diagnostics_router)
     app.include_router(auth_router)
+    app.include_router(user_auth_router)
     app.include_router(copy_inputs_router)
     app.include_router(generation_queue_router)
     app.include_router(gallery_router)
