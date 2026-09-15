@@ -166,6 +166,20 @@ def _persist_message(db: Session, agent_session: AgentSession, **kwargs: Any) ->
     return message
 
 
+@dataclass
+class _TurnState:
+    """一轮对话的跨事件状态：核心生成器写入，两种消费方式（流式/同步）各自取用。
+
+    把状态放在显式对象里，是为了让 run_agent_turn 与 run_agent_turn_events 共用同一份
+    循环逻辑——历史实现是两份近似代码，已经漂移出行为差异（nudge 重试被丢弃）。
+    """
+
+    tool_events: list[dict[str, Any]] = field(default_factory=list)
+    pending_generation_tasks: list[dict[str, Any]] = field(default_factory=list)
+    llm_error: AgentLLMError | None = None
+    final_session: AgentSession | None = None
+
+
 def run_agent_turn(
     db: Session,
     *,
@@ -173,121 +187,40 @@ def run_agent_turn(
     user_content: str,
     llm: AgentLLMClient | None = None,
 ) -> AgentTurnResult:
-    """执行一轮对话：持久化用户消息 → LLM 工具循环 → 最终回复落库。"""
-    agent_session = get_agent_session(db, agent_session_id)
-    normalized_content = user_content.strip()
-    if not normalized_content:
-        raise ValueError("消息内容不能为空")
-    _persist_message(db, agent_session, role="user", content=normalized_content)
+    """执行一轮对话：持久化用户消息 → LLM 工具循环 → 最终回复落库。
 
-    client = llm or build_agent_llm_client()
-    llm_messages = _build_llm_messages(agent_session)
-    tool_events: list[dict[str, Any]] = []
-    pending_generation_tasks: list[dict[str, Any]] = []
-    used_tools: list[str] = []
-
-    tool_nudged = False
-    for _ in range(MAX_TOOL_ROUNDS):
-        try:
-            response = client.chat(messages=llm_messages, tools=tool_schemas())
-        except AgentLLMError:
-            logger.exception("Agent LLM 调用失败: session_id=%s", agent_session_id)
-            _persist_message(
-                db,
-                agent_session,
-                role="assistant",
-                content=_llm_failure_text(db, agent_session.id),
-            )
-            raise
-        if not response.tool_calls and not tool_nudged and not used_tools:
-            tool_nudged = True
-            llm_messages.append({"role": "system", "content": _TOOL_NUDGE_MESSAGE})
-            response = client.chat(messages=llm_messages, tools=tool_schemas())
-        if response.tool_calls:
-            _persist_message(
-                db,
-                agent_session,
-                role="assistant",
-                content=response.content or "",
-                tool_calls_json=[
-                    {"call_id": call.call_id, "name": call.name, "arguments": call.arguments}
-                    for call in response.tool_calls
-                ],
-                **_usage_columns(response.usage),
-            )
-            llm_messages.append(
-                {
-                    "role": "assistant",
-                    "content": response.content,
-                    "tool_calls": [
-                        {
-                            "id": call.call_id,
-                            "type": "function",
-                            "function": {
-                                "name": call.name,
-                                "arguments": json.dumps(call.arguments, ensure_ascii=False),
-                            },
-                        }
-                        for call in response.tool_calls
-                    ],
-                }
-            )
-            for call in response.tool_calls:
-                tool_started = time.perf_counter()
-                result = execute_tool(db, agent_session, name=call.name, arguments=call.arguments, llm=client)
-                logger.info(
-                    "Agent 工具执行完成: tool=%s duration_ms=%.0f",
-                    call.name,
-                    (time.perf_counter() - tool_started) * 1000,
-                )
-                used_tools.append(call.name)
-                result_json = json.dumps(result, ensure_ascii=False)
-                _persist_message(
-                    db,
-                    agent_session,
-                    role="tool",
-                    content=result_json,
-                    tool_call_id=call.call_id,
-                    tool_name=call.name,
-                    image_session_id=result.get("image_session_id"),
-                )
-                llm_messages.append({"role": "tool", "tool_call_id": call.call_id, "content": result_json})
-                tool_events.append({"tool": call.name, "result": result})
-                for task in result.get("pending_tasks", []) or []:
-                    pending_generation_tasks.append({"image_session_id": result.get("image_session_id"), **task})
-            continue
-
-        _persist_message(
-            db,
-            agent_session,
-            role="assistant",
-            content=(response.content or "").strip() or "（我没想到要说什么，请再告诉我一点需求。）",
-            **_usage_columns(response.usage),
-        )
-        _advance_stage(db, agent_session, used_tools)
-        db.expire_all()
-        refreshed = get_agent_session(db, agent_session_id)
-        return AgentTurnResult(
-            agent_session=refreshed,
-            messages=list(refreshed.messages),
-            tool_events=tool_events,
-            pending_generation_tasks=pending_generation_tasks,
-        )
-
-    _persist_message(
+    实现上消费事件化核心 `_stream_agent_turn`（唯一一份循环逻辑），本函数只做
+    "驱动生成器 + 组装返回值"的适配。LLM 连接失败时保持历史语义：失败话术已落库，
+    并向上抛出 AgentLLMError 供路由转 503。
+    """
+    state = _TurnState()
+    for _event in _stream_agent_turn(
         db,
-        agent_session,
-        role="assistant",
-        content="这个需求比预想的复杂，我们先分解一下：你希望我先出文案，还是先看几张风格参考？",
-    )
-    db.expire_all()
-    refreshed = get_agent_session(db, agent_session_id)
+        agent_session_id=agent_session_id,
+        user_content=user_content,
+        llm=llm,
+        state=state,
+    ):
+        pass
+    if state.llm_error is not None:
+        raise state.llm_error
+    refreshed = state.final_session or get_agent_session(db, agent_session_id)
     return AgentTurnResult(
         agent_session=refreshed,
         messages=list(refreshed.messages),
-        tool_events=tool_events,
-        pending_generation_tasks=pending_generation_tasks,
+        tool_events=state.tool_events,
+        pending_generation_tasks=state.pending_generation_tasks,
     )
+
+
+def append_agent_context_note(db: Session, *, agent_session_id: str, content: str) -> AgentMessage:
+    """往会话里追加一条"系统告知"式的上下文（以 user 角色承载，UI 与模型都可见）。
+
+    用于把不经过模型的外部事件（如用户刚上传了模板）告知 agent，
+    使下一轮对话不必用户复述就能引用它。
+    """
+    agent_session = get_agent_session(db, agent_session_id)
+    return _persist_message(db, agent_session, role="user", content=content)
 
 
 def _advance_stage(db: Session, agent_session: AgentSession, used_tools: list[str]) -> None:
@@ -314,7 +247,7 @@ def run_agent_turn_events(
     user_content: str,
     llm: AgentLLMClient | None = None,
 ) -> Generator[dict[str, Any], None, None]:
-    """事件化的一轮对话：每个关键步骤即时 yield，供 SSE 流式输出。
+    """事件化的一轮对话（公开入口）：每个关键步骤即时 yield，供 SSE 流式输出。
 
     帧类型：
       stage      — 阶段徽章变化（session 级）
@@ -323,6 +256,30 @@ def run_agent_turn_events(
       tool_result— 工具结果（文案提案/图片资产/错误话术）
       done       — 整轮结束，携带与会话快照等价的最小结果
       error      — LLM 连接失败等人话错误（随后 done）
+
+    同步形态的 run_agent_turn 消费同一个核心生成器，两条路径不会漂移。
+    """
+    yield from _stream_agent_turn(
+        db,
+        agent_session_id=agent_session_id,
+        user_content=user_content,
+        llm=llm,
+        state=_TurnState(),
+    )
+
+
+def _stream_agent_turn(
+    db: Session,
+    *,
+    agent_session_id: str,
+    user_content: str,
+    llm: AgentLLMClient | None = None,
+    state: _TurnState,
+) -> Generator[dict[str, Any], None, None]:
+    """一轮对话的唯一核心实现：落库 + LLM 工具循环 + 事件产出。
+
+    结果同时写入 `state`（工具事件、待跟踪生成任务、LLM 异常、最终会话快照），
+    使同步调用方无需解析事件流即可拿到等价结果。
     """
     agent_session = get_agent_session(db, agent_session_id)
     normalized_content = user_content.strip()
@@ -337,13 +294,12 @@ def run_agent_turn_events(
 
     client = llm or build_agent_llm_client()
     llm_messages = _build_llm_messages(agent_session)
-    tool_events: list[dict[str, Any]] = []
-    pending_generation_tasks: list[dict[str, Any]] = []
     used_tools: list[str] = []
 
     def _finish() -> Generator[dict[str, Any], None, None]:
         db.expire_all()
         refreshed = get_agent_session(db, agent_session_id)
+        state.final_session = refreshed
         yield {"event": "stage", "data": {"stage": refreshed.stage}}
         yield {
             "event": "done",
@@ -351,8 +307,8 @@ def run_agent_turn_events(
                 "session_id": refreshed.id,
                 "stage": refreshed.stage,
                 "image_session_id": refreshed.image_session_id,
-                "tool_events": tool_events,
-                "pending_generation_tasks": pending_generation_tasks,
+                "tool_events": state.tool_events,
+                "pending_generation_tasks": state.pending_generation_tasks,
             },
         }
 
@@ -360,8 +316,9 @@ def run_agent_turn_events(
     for _ in range(MAX_TOOL_ROUNDS):
         try:
             response = client.chat(messages=llm_messages, tools=tool_schemas())
-        except AgentLLMError:
+        except AgentLLMError as exc:
             logger.exception("Agent LLM 调用失败(流式): session_id=%s", agent_session_id)
+            state.llm_error = exc
             failure_text = _llm_failure_text(db, agent_session.id)
             _persist_message(db, agent_session, role="assistant", content=failure_text)
             db.expire_all()
@@ -369,14 +326,15 @@ def run_agent_turn_events(
             yield from _finish()
             return
         if not response.tool_calls and not tool_nudged and not used_tools:
-            # 首轮只回文字未调工具：注入督促后重试一次。
-            # 与非流式路径一致：督促重试若给出工具调用，会落入下方 tool_calls 分支正常执行。
+            # 首轮只回文字未调工具：注入督促后重试一次（工具优先铁律）。
+            # 督促重试若给出工具调用，会落入下方 tool_calls 分支正常执行。
             tool_nudged = True
             llm_messages.append({"role": "system", "content": _TOOL_NUDGE_MESSAGE})
             try:
                 response = client.chat(messages=llm_messages, tools=tool_schemas())
-            except AgentLLMError:
+            except AgentLLMError as exc:
                 logger.exception("Agent LLM 调用失败(流式·督促重试): session_id=%s", agent_session_id)
+                state.llm_error = exc
                 failure_text = _llm_failure_text(db, agent_session.id)
                 _persist_message(db, agent_session, role="assistant", content=failure_text)
                 db.expire_all()
@@ -433,10 +391,12 @@ def run_agent_turn_events(
                     image_session_id=result.get("image_session_id"),
                 )
                 llm_messages.append({"role": "tool", "tool_call_id": call.call_id, "content": result_json})
-                tool_events.append({"tool": call.name, "result": result})
+                state.tool_events.append({"tool": call.name, "result": result})
                 yield {"event": "tool_result", "data": {"tool": call.name, "result": result}}
                 for task in result.get("pending_tasks", []) or []:
-                    pending_generation_tasks.append({"image_session_id": result.get("image_session_id"), **task})
+                    state.pending_generation_tasks.append(
+                        {"image_session_id": result.get("image_session_id"), **task}
+                    )
             continue
 
         assistant_message = _persist_message(

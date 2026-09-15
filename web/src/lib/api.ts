@@ -546,10 +546,12 @@ export const api = {
     const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
     return request(`/api/agent/assets${query}`);
   },
-  async uploadAgentAsset(file: File, kind: string): Promise<AgentAssetEntry> {
+  async uploadAgentAsset(file: File, kind: string, agentSessionId?: string | null): Promise<AgentAssetEntry> {
     const body = new FormData();
     body.append("file", file);
     body.append("kind", kind);
+    // 带上会话 id：后端会自动打标并把"刚上传了模板"写进会话，agent 因此知情
+    if (agentSessionId) body.append("agent_session_id", agentSessionId);
     return request("/api/agent/assets", { method: "POST", body });
   },
   deleteAgentAsset(assetId: string): Promise<void> {

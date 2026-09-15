@@ -314,3 +314,48 @@ def test_search_asset_entries_prefilter_keeps_tag_only_matches(configured_env: P
         assert search_asset_entries(db, "不存在的词xyz") == []
     finally:
         db.close()
+
+
+def test_upload_with_session_id_notifies_agent_and_marks_session(configured_env: Path, install_scripted_llm) -> None:
+    """P1 上传闭环：带 agent_session_id 上传后，会话里出现告知，agent 下一轮即可见。"""
+    from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
+    from productflow_backend.infrastructure.db.session import get_session_factory
+    from productflow_backend.presentation.api import create_app
+
+    install_scripted_llm(
+        [AgentLLMResponse(content="收到，这张模板我记下了。")],
+        vision_response={"layout": "居中", "palette": ["#111111"], "tags": ["简约"]},
+    )
+    client = TestClient(create_app())
+    _login(client)
+
+    db = get_session_factory()()
+    try:
+        agent_session = create_agent_session(db, title="上传闭环")
+        session_id = agent_session.id
+    finally:
+        db.close()
+
+    response = client.post(
+        "/api/agent/assets",
+        files={"file": ("模板图.png", _png_bytes(), "image/png")},
+        data={"kind": "template", "agent_session_id": session_id},
+    )
+    assert response.status_code == 201, response.text
+    asset_id = response.json()["id"]
+
+    # 告知已写入会话（user 角色，UI 与模型都可见），并带上 asset_id 供复刻引用
+    detail = client.get(f"/api/agent/sessions/{session_id}").json()
+    notes = [m for m in detail["messages"] if m["role"] == "user" and asset_id in m["content"]]
+    assert notes, [m["content"] for m in detail["messages"]]
+    assert "template_asset_id" in notes[0]["content"]
+
+    # agent 下一轮能看到该告知（构建的 LLM 上下文里包含它）
+    llm = install_scripted_llm([AgentLLMResponse(content="好的，我按这张模板来。")])
+    db = get_session_factory()()
+    try:
+        run_agent_turn(db, agent_session_id=session_id, user_content="就照这个风格做一张")
+    finally:
+        db.close()
+    sent = json.dumps(llm.calls[-1]["messages"], ensure_ascii=False)
+    assert asset_id in sent

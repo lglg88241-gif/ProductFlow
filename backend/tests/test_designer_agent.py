@@ -489,3 +489,48 @@ def test_agent_stream_nudge_executes_tool_call(configured_env: Path, install_scr
         assert refreshed.stage == "produce"
     finally:
         db.close()
+
+
+def test_sync_and_stream_paths_agree_on_same_script(configured_env: Path, install_scripted_llm) -> None:
+    """防漂移：同一剧本下 run_agent_turn 与 run_agent_turn_events 必须产出一致结果。
+
+    历史实现是两份近似代码，已漂移出"nudge 重试被丢弃"的行为差异；
+    现在两者共用 _stream_agent_turn，本测试锁住等价性。
+    """
+    import productflow_backend.application.designer_agent.loop as loop_module
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    script = [
+        AgentLLMResponse(content="我可以帮你做海报哦，告诉我更多吧。"),  # 首轮纯文字 → 触发督促
+        AgentLLMResponse(
+            content=None,
+            tool_calls=[AgentToolCall(call_id="call-copy-eq", name="write_copy", arguments={"brief": "开业文案"})],
+        ),
+        AgentLLMResponse(content=json.dumps([{"title": "A", "content": "文案A", "hashtags": []}], ensure_ascii=False)),
+        AgentLLMResponse(content="文案来啦。"),
+    ]
+
+    def _run(use_stream: bool):
+        install_scripted_llm(script)
+        db = get_session_factory()()
+        try:
+            agent_session = loop_module.create_agent_session(db)
+            if use_stream:
+                events = list(
+                    loop_module.run_agent_turn_events(
+                        db, agent_session_id=agent_session.id, user_content="给我三版开业文案"
+                    )
+                )
+                tools = [e["data"]["tool"] for e in events if e["event"] == "tool_result"]
+                done = [e for e in events if e["event"] == "done"][-1]
+                return tools, done["data"]["stage"]
+            result = loop_module.run_agent_turn(db, agent_session_id=agent_session.id, user_content="给我三版开业文案")
+            tools = [event["tool"] for event in result.tool_events]
+            return tools, result.agent_session.stage
+        finally:
+            db.close()
+
+    sync_tools, sync_stage = _run(use_stream=False)
+    stream_tools, stream_stage = _run(use_stream=True)
+    assert sync_tools == stream_tools == ["write_copy"], (sync_tools, stream_tools)
+    assert sync_stage == stream_stage == "produce", (sync_stage, stream_stage)

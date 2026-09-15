@@ -18,7 +18,7 @@ from productflow_backend.application.asset_library import (
     list_asset_entries,
     register_asset_upload,
 )
-from productflow_backend.application.designer_agent.llm import AgentLLMError
+from productflow_backend.application.designer_agent.llm import AgentLLMError, build_agent_llm_client
 from productflow_backend.application.designer_agent.loop import (
     create_agent_session,
     delete_agent_session,
@@ -193,6 +193,7 @@ def list_agent_assets_endpoint(
 async def upload_agent_asset_endpoint(
     file: UploadFile = File(...),
     kind: str = Form(default="template"),
+    agent_session_id: str | None = Form(default=None),
     session: Session = Depends(get_session),
 ) -> dict:
     from productflow_backend.presentation.upload_validation import read_validated_image_upload
@@ -204,10 +205,44 @@ async def upload_agent_asset_endpoint(
             kind=kind if kind in ASSET_KINDS else "template",
             filename=validated.filename,
             content=validated.content,
+            agent_session_id=agent_session_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # 上传即闭环：自动 vision 打标（失败不影响上传），并向会话注入告知让 agent 知情。
+    # 两者都是尽力而为——上传本身绝不因分析或通知失败而失败。
+    if agent_session_id:
+        _analyze_uploaded_asset_best_effort(session, entry)
+        _notify_agent_session_of_upload(session, agent_session_id=agent_session_id, entry=entry)
     return _serialize_asset(entry)
+
+
+def _analyze_uploaded_asset_best_effort(session: Session, entry) -> None:
+    """用视觉模型给新素材打标（模板档案 + 检索标签）；失败保留原样，仍可检索。"""
+    from productflow_backend.application.asset_library import analyze_asset
+
+    try:
+        analyze_asset(session, entry, build_agent_llm_client())
+    except Exception:  # noqa: BLE001
+        logger.warning("上传素材自动打标失败（不影响上传）: asset_id=%s", entry.id, exc_info=True)
+
+
+def _notify_agent_session_of_upload(session: Session, *, agent_session_id: str, entry) -> None:
+    """把"用户刚上传了素材"写进会话，让 agent 下一轮就能看见并使用它。"""
+    from productflow_backend.application.designer_agent.loop import append_agent_context_note
+
+    try:
+        append_agent_context_note(
+            session,
+            agent_session_id=agent_session_id,
+            content=(
+                f"[我上传了一张{('模板' if entry.kind == 'template' else '素材')}图："
+                f"{entry.title or '未命名'}，已存进素材库，素材 id={entry.id}]"
+                "——如需按它的风格出图，请把 generate_image 的 template_asset_id 设为这个 id。"
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("上传后向 agent 会话注入告知失败: asset_id=%s", entry.id, exc_info=True)
 
 
 @router.get("/assets/{asset_id}/download")

@@ -291,9 +291,11 @@ export function WorkbenchPage() {
   const assetsQuery = useQuery({ queryKey: ["agent-assets"], queryFn: () => api.listAgentAssets() });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const uploadMutation = useMutation({
-    mutationFn: (file: File) => api.uploadAgentAsset(file, "template"),
+    mutationFn: (file: File) => api.uploadAgentAsset(file, "template", activeSessionId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["agent-assets"] });
+      // 上传已写入会话上下文（agent 可知情并复刻风格），刷新让用户看到这条告知
+      if (activeSessionId) void queryClient.invalidateQueries({ queryKey: ["agent-session", activeSessionId] });
     },
   });
 

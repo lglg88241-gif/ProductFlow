@@ -6,6 +6,31 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Backup, restore and recovery drill (P1)**: `scripts/backup.sh` snapshots Postgres
+  (`pg_dump -Fc`), the media volume, and the Redis RDB into `backups/<timestamp>/` with a
+  sha256 manifest and retention pruning; `scripts/restore.sh` restores DB and/or storage
+  with checksum verification and an explicit confirmation gate; `scripts/backup_drill.sh`
+  proves restorability by restoring into a throwaway Postgres container (validating table
+  count, migration revision against the manifest, and key row counts) without touching
+  production. Wired as `just backup` / `just backup-drill` / `just restore <dir>`; procedure
+  and migration-rollback guidance in `docs/BACKUP_RESTORE.md`.
+- **Upload → style-replication loop**: `POST /api/agent/assets` accepts an optional
+  `agent_session_id`; when present the backend vision-tags the upload (best-effort) and
+  appends a context note to that session carrying the asset id, so the agent knows about a
+  freshly uploaded template on the next turn instead of the user having to describe it.
+  The workbench passes the active session id and refreshes the transcript.
+
+### Changed
+
+- **Single agent-turn implementation**: `run_agent_turn` (returns a result object) is now a
+  thin adapter over the same core generator that powers `run_agent_turn_events` (SSE frames).
+  Previously the two were near-duplicate code and had already drifted apart (`loop.py` is
+  ~50 lines shorter). A regression test asserts both paths produce identical tools and stage
+  for the same script.
+- Legacy flaky SSE heartbeat test replaced with a deterministic one (it asserted on the
+  first frame, which may legitimately be a heartbeat comment when the pump thread starts
+  slower than the heartbeat interval).
+
 - **Multi-candidate generation (A)**: the agent's `generate_image` accepts `count` (1–4,
   default 2) and returns `candidates` (asset id / url / label) with `primary_url`; when the
   durable queue is still working it reports `pending` + `expected_candidates`. The workbench

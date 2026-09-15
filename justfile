@@ -58,6 +58,18 @@ release:
 release-dry-run:
     DRY_RUN=1 bash scripts/release.sh
 
+# 备份 Postgres + media 存储 + Redis 快照到 ./backups/<时间戳>/
+backup:
+    bash scripts/backup.sh
+
+# 恢复演练：把最新备份恢复到一次性临时容器验证可恢复性（不动生产数据）
+backup-drill:
+    bash scripts/backup_drill.sh
+
+# 从备份恢复（破坏性：覆盖当前数据库与存储，需 RESTORE_CONFIRM=yes 或交互确认）
+restore dir:
+    bash scripts/restore.sh {{dir}}
+
 # 对运行中的实例执行全功能演示（compose 栈或已启动的后端）
 demo:
     uv run --directory backend python scripts/demo_flow.py
