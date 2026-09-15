@@ -112,7 +112,10 @@ def test_build_llm_messages_skips_group_with_partially_missing_results(configure
         serialized = json.dumps(messages, ensure_ascii=False)
 
         assert "call-a" not in serialized and "call-b" not in serialized
-        assert [m["role"] for m in messages] == ["system", "assistant"]
+        # 审计 R4 修复后的语义：残缺工具组与其孤立结果被剔除，
+        # 但工具调用之前的用户消息必须保留（旧行为会把"问1"一起丢掉）。
+        assert [m["role"] for m in messages] == ["system", "user", "assistant"]
+        assert messages[1]["content"] == "问1"
         assert messages[-1]["content"] == "后来的回复"
     finally:
         db.close()

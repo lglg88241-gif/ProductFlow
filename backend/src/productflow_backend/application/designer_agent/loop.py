@@ -121,29 +121,32 @@ def _message_to_llm_format(message: AgentMessage) -> dict[str, Any]:
 def _build_llm_messages(agent_session: AgentSession) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
     recent = list(agent_session.messages)[-MAX_HISTORY_MESSAGES:]
-    # 截断不能把 assistant 的 tool_calls 与对应 tool 结果拆开：从首个完整组开始
-    start = 0
-    for index, message in enumerate(recent):
-        if message.role == "assistant" and message.tool_calls_json:
-            start = index
-            break
-    # 孤儿 tool_calls 自愈：SSE 断线可能留下 assistant(tool_calls) 已落库、tool 结果未落库的
-    # 半截组，下一轮发给 OpenAI 兼容 API 会直接 400 且每轮复现。构建时校验配对：存在无配对
-    # 结果 call 的 assistant 组整组跳过（连带其残缺 tool 结果）；无状态过滤、不改库。
+    # 裁剪按"完整工具组"做，而不是"从首个工具调用开始截"。
+    #
+    # 历史缺陷（审计 R4）：起点曾被设为第一个带 tool_calls 的 assistant，导致它之前
+    # 的全部消息被丢弃——用户最初的需求就此消失，4 条消息的短会话也会丢需求，
+    # 模型于是以为用户什么都没说过。正确做法是保留窗口内的顺序上下文，
+    # 只丢弃"不完整"的工具组及其孤立结果（断线产物与截断产物，二者发给
+    # OpenAI 兼容 API 都会 400）。
     paired_tool_call_ids = {
         message.tool_call_id for message in recent if message.role == "tool" and message.tool_call_id
     }
-    skip_group = True  # 组前的孤立 tool 消息（截断产物）同样不放行
-    for message in recent[start:]:
+    kept_group_call_ids: set[str] = set()
+    for message in recent:
         if message.role == "assistant" and message.tool_calls_json:
-            skip_group = any(
-                call.get("call_id", "") not in paired_tool_call_ids for call in message.tool_calls_json
-            )
-            if skip_group:
+            group_call_ids = {call.get("call_id", "") for call in message.tool_calls_json}
+            if group_call_ids - paired_tool_call_ids:
+                # 组内存在无配对结果的 call → 整组跳过（连带其残缺 tool 结果）
                 continue
-        elif message.role == "tool" and skip_group:
-            continue
-        messages.append(_message_to_llm_format(message))
+            kept_group_call_ids |= group_call_ids
+            messages.append(_message_to_llm_format(message))
+        elif message.role == "tool":
+            # tool 结果只有在其 assistant 组先被保留时才可用；孤立结果一律丢弃
+            if message.tool_call_id not in kept_group_call_ids:
+                continue
+            messages.append(_message_to_llm_format(message))
+        else:
+            messages.append(_message_to_llm_format(message))
     return messages
 
 

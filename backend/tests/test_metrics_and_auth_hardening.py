@@ -164,12 +164,17 @@ def test_login_rate_limit_returns_429_after_repeated_failures(configured_env: Pa
         auth_module.login_rate_limiter.reset_all()
 
 
-def test_login_rate_limit_isolates_forwarded_clients(configured_env: Path) -> None:
-    """X-Forwarded-For 参与分桶：一个 IP 打满 5 次后，另一个 IP 仍可正常登录（回归：全局桶）。"""
+def test_login_rate_limit_isolates_forwarded_clients(configured_env: Path, monkeypatch) -> None:
+    """X-Forwarded-For 参与分桶（仅可信代理）：一个 IP 打满 5 次后，另一个 IP 仍可登录。
+
+    TestClient 以 10.0.0.1 作为 TCP 对端并把它配置为可信代理，模拟"nginx 入口已用
+    $remote_addr 覆盖 XFF"的真实部署。
+    """
     from productflow_backend.presentation.api import create_app
     from productflow_backend.presentation.rate_limit import login_rate_limiter
 
-    client = TestClient(create_app())
+    monkeypatch.setenv("TRUSTED_PROXY_IPS", "10.0.0.1")
+    client = TestClient(create_app(), client=("10.0.0.1", 50000))
     try:
         for _ in range(5):
             assert (

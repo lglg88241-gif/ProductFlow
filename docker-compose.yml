@@ -51,6 +51,9 @@ services:
       # 公网部署（HTTPS 反代之后）务必改为 true；纯 HTTP 内网访问保持 false。
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       ADMIN_ACCESS_KEY: ${ADMIN_ACCESS_KEY:?set ADMIN_ACCESS_KEY in .env}
+      # 可信代理名单：只有来自这些地址的连接才解析 X-Forwarded-For。
+      # 留空 = 不信任任何 XFF（安全默认，但限速会退化为按 nginx 单一身份计数）。
+      TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-172.16.0.0/12}
       SETTINGS_ACCESS_TOKEN: ${SETTINGS_ACCESS_TOKEN:?set SETTINGS_ACCESS_TOKEN in .env}
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
       # 设计师 Agent 供应商（.env 直读；界面配置的 agent 绑定优先）

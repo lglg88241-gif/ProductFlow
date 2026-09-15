@@ -69,6 +69,7 @@ def test_env_example_has_no_dead_variables() -> None:
         "REDIS_HOST_PORT",
         "REMOTE_FETCH_ALLOW_PRIVATE_NETWORK",
         "STORAGE_HOST_PATH",
+        "TRUSTED_PROXY_IPS",
         "WEB_PORT",
     }
     known = {name.upper() for name in Settings.model_fields} | allowed_extra
