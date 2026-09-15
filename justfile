@@ -58,6 +58,10 @@ release:
 release-dry-run:
     DRY_RUN=1 bash scripts/release.sh
 
+# 重新生成 .env.example 的完整配置参考（改过 config.py 字段后运行）
+env-reference:
+    uv run --directory backend python scripts/gen_env_reference.py
+
 # Agent 质量评测（golden set）：真实模型跑一批小白需求，给路由/澄清/话术打分
 agent-eval:
     uv run --directory backend python scripts/agent_eval.py --base-url http://127.0.0.1:${WEB_PORT:-29281} --admin-key ${ADMIN_ACCESS_KEY}

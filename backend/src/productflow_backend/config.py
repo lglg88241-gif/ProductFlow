@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -304,6 +305,33 @@ def get_settings() -> Settings:
     """
 
     return Settings()
+
+
+# 代码直接 os.getenv 读取、而非 Settings 字段的环境变量：拼错检测不应把它们当异常
+_INTENTIONAL_NON_FIELD_ENV = frozenset(
+    {
+        "ADMIN_GATE_OPEN_IN_PRODUCTION",
+        "MEDIA_CLEANUP_INTERVAL_SECONDS",
+        "RECONCILE_INTERVAL_SECONDS",
+        "REMOTE_FETCH_ALLOW_PRIVATE_NETWORK",
+    }
+)
+
+# 只对"用户会手填、拼错后果严重"的前缀告警——窄口径保证零误报，
+# 因此可以安全地在启动时提示，而不必把 Settings 的 extra 改成 forbid
+# （那会因 compose/系统注入的无关变量直接拒绝启动）。
+_WATCHED_ENV_PREFIXES = ("AGENT_", "IMAGE_", "TEXT_", "PROMPT_", "POSTER_", "UPLOAD_")
+
+
+def find_suspicious_env_vars(environ: Mapping[str, str] | None = None) -> list[str]:
+    """找出"看起来是本应用配置、但不是任何已知字段"的环境变量（多为拼错或已废弃）。
+
+    Settings 设了 extra="ignore"，拼错的变量会被静默吞掉——例如把 AGENT_MODEL
+    写成 AGENT_MODLE，程序照默认值跑，用户却以为自己的配置生效了。
+    """
+    source = os.environ if environ is None else environ
+    known = {name.upper() for name in Settings.model_fields} | _INTENTIONAL_NON_FIELD_ENV
+    return sorted(key for key in source if key not in known and key.startswith(_WATCHED_ENV_PREFIXES))
 
 
 CONFIG_DEFINITIONS: tuple[ConfigDefinition, ...] = (

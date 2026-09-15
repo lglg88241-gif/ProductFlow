@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from productflow_backend.application.asset_library import bootstrap_builtin_assets
-from productflow_backend.config import get_runtime_settings, get_settings
+from productflow_backend.config import find_suspicious_env_vars, get_runtime_settings, get_settings
 from productflow_backend.infrastructure.logging import (
     cleanup_old_logs,
     configure_logging,
@@ -53,6 +53,12 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         cleanup_old_logs(settings)
+        suspicious_env = find_suspicious_env_vars()
+        if suspicious_env:
+            logging.getLogger(__name__).warning(
+                "检测到疑似拼错或已废弃的环境变量（会被静默忽略，当前按默认值运行）: %s",
+                ", ".join(suspicious_env),
+            )
         if provider_config_tables_available():
             ensure_provider_config_bootstrapped()
         recover_unfinished_workflow_runs()

@@ -6,6 +6,45 @@ All notable changes for ProductFlow are recorded here.
 
 ### Added
 
+- **Agent quality eval (golden set)**: `scripts/agent_eval.py` (wired as `just agent-eval`)
+  runs realistic beginner requests against the real model and scores tool routing, the
+  one-question clarification budget, and technical-detail leakage in user-visible text.
+  Costly scenarios (real image generation) are opt-in via `--include-costly`; if the very
+  first scenario fails on the provider the run aborts with a diagnosis instead of burning
+  the whole batch.
+- **Generated env reference + misconfiguration detection**: `scripts/gen_env_reference.py`
+  (`just env-reference`) emits the full 68-field reference into `.env.example`, and
+  `find_suspicious_env_vars()` warns at startup about typo'd or stale variables under the
+  `AGENT_`/`IMAGE_`/`TEXT_`/`PROMPT_`/`POSTER_`/`UPLOAD_` prefixes — previously
+  `extra="ignore"` swallowed these silently, so a typo'd `AGENT_MODLE` ran on defaults while
+  the operator believed their config applied.
+
+### Fixed
+
+- **`.env`-configured agent fallback was silently dead**: `build_agent_llm_client` gated the
+  fallback chain on `fallback_provider_profile_id`, a field only the UI-binding path produces
+  — so a fallback configured purely via `.env` (the relay scenario) was never installed. The
+  symptom was every agent turn failing with 503 and *no fallback log line at all* while the
+  primary provider wobbled. It now gates on key + model, and a fallback without its own base
+  URL inherits the primary's instead of silently falling through to the public default.
+- Removed two dead `.env.example` variables (`JOB_MAX_ATTEMPTS`, `JOB_RETRY_DELAY_MS`, zero
+  code references) and aligned `IMAGE_GENERATE_MODEL` with the real default (`gpt-image-2`,
+  was `gpt-5.4`).
+
+### Changed
+
+- **Tool spine refactor**: tool schemas moved to `designer_agent/tool_schemas.py` and the
+  12-branch `execute_tool` if-chain became an explicit registry (`_TOOL_HANDLERS` with a
+  uniform `ToolContext`). Adding a tool is now one schema entry plus one registry entry.
+  The session-stage map is derived from the registry, closing the gap where only 6 of 12
+  tools advanced the stage (delivery/batch steps left the badge stale), and three duplicated
+  enum constants collapsed to one source. Guard tests assert schema / handler / stage stay
+  in sync.
+- New `tests/test_agent_contract.py` ratchets the per-turn fixed overhead (measured ~5,048
+  estimated tokens: ~1,601 system prompt + ~3,447 tool schemas) against a 6,000 budget, plus
+  a 600-token per-tool cap — so prompt/tool growth becomes a visible decision instead of
+  silent drift.
+
 - **Backup, restore and recovery drill (P1)**: `scripts/backup.sh` snapshots Postgres
   (`pg_dump -Fc`), the media volume, and the Redis RDB into `backups/<timestamp>/` with a
   sha256 manifest and retention pruning; `scripts/restore.sh` restores DB and/or storage
