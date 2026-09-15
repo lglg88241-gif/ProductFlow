@@ -443,9 +443,9 @@ def test_retry_stops_when_total_budget_exhausted(configured_env) -> None:
         client.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
     assert completions.calls == 6, "预算充足时应把重试次数用满"
 
-    # 预算已被消耗（0.0 秒 = 立刻视为耗尽）→ 只尝试一次就放弃
+    # 预算低于最小请求超时 → 直接拒绝发起（不给备用留时间就不该开打），而不是硬打一次
     client, completions = _client(0.0)
-    with pytest.raises(AgentLLMError):
+    with pytest.raises(AgentLLMError, match="预算不足"):
         client.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
-    assert completions.calls == 1, "预算耗尽后不应继续重试"
+    assert completions.calls == 0, "可用预算不足时不应发起请求"
 

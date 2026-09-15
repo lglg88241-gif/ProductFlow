@@ -95,3 +95,22 @@ def test_suspicious_env_var_detection_is_quiet_in_normal_setups() -> None:
     environ = {name.upper(): "x" for name in Settings.model_fields}
     environ.update({"POSTGRES_PASSWORD": "x", "PIP_INDEX_URL": "x", "STORAGE_HOST_PATH": "/data"})
     assert find_suspicious_env_vars(environ) == []
+
+
+def test_sensitive_defaults_never_appear_in_env_example() -> None:
+    """敏感字段的默认值绝不允许出现在 .env.example（含注释）。
+
+    审计指出：原实现虽把变量名注释掉，却仍把默认值打进注释里——今天默认为空
+    不代表将来为空，一旦有人给密钥类字段设默认值就会进版本库。
+    """
+    from productflow_backend.config import Settings
+
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    leaked: list[str] = []
+    for field_name, field in Settings.model_fields.items():
+        if not any(hint in field_name.upper() for hint in ("KEY", "SECRET", "TOKEN", "PASSWORD")):
+            continue
+        default = field.default
+        if isinstance(default, str) and len(default) >= 6 and default in text:
+            leaked.append(field_name.upper())
+    assert not leaked, f"这些敏感字段的默认值出现在 .env.example 里: {leaked}"

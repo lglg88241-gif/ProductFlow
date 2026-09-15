@@ -39,6 +39,31 @@ DEFAULT_RETRY_BASE_DELAY_SECONDS = 1.0
 # 整轮 LLM 调用的总时长预算：必须低于网关（nginx proxy_read_timeout 300s），
 # 否则"重试次数 × 单次超时"会让请求在网关侧被切断成 504。
 DEFAULT_TOTAL_BUDGET_SECONDS = 240.0
+# 主用供应商最多占用整轮预算的比例份额，其余留给备用——避免主用把预算耗光导致无法降级
+DEFAULT_PRIMARY_RESERVE_FRACTION = 0.667
+# 单次 HTTP 请求的最小超时：预算再紧也要给一次真实尝试留出时间
+MIN_REQUEST_TIMEOUT_SECONDS = 5.0
+
+
+@dataclass
+class TurnDeadline:
+    """整轮共享的截止时间：主用、备用、退避、内部调用都从同一个预算里扣。
+
+    历史缺陷：预算按客户端各自计时（主备各持一个 240s），叠加 SDK 默认 2 次重试，
+    实际最坏耗时远超网关超时，请求会在 nginx 侧被切成 504。
+    """
+
+    total_seconds: float
+    started: float = field(default_factory=time.perf_counter)
+
+    def elapsed(self) -> float:
+        return time.perf_counter() - self.started
+
+    def remaining(self) -> float:
+        return self.total_seconds - self.elapsed()
+
+    def exhausted(self) -> bool:
+        return self.remaining() <= 0
 
 
 @dataclass(frozen=True)
@@ -177,16 +202,26 @@ class OpenAICompatAgentClient:
         base_url: str | None,
         model: str,
         retry_policy: TransientRetryPolicy | None = None,
+        deadline: TurnDeadline | None = None,
+        reserve_seconds: float = 0.0,
     ) -> None:
         self.provider_name = provider_name
         self.model = model
         self.retry_policy = retry_policy or TransientRetryPolicy()
+        # 截止时间由调用方（build_agent_llm_client / 降级包装）注入并在主备之间共享；
+        # 未注入时退化为"本次 chat 自持一个预算"，与单供应商场景等价。
+        self._deadline = deadline
+        # 为下游（备用供应商）保留的秒数：主用不得把它用掉
+        self._reserve_seconds = max(0.0, reserve_seconds)
         # 保留地址便于诊断（降级切换/排障时需要知道实际打的是哪个中转站）
         self.base_url = base_url
         cache_key = (api_key, base_url or None, _AGENT_LLM_TIMEOUT_SECONDS)
         self._client = _OPENAI_CLIENTS.get_or_create(
             cache_key,
-            lambda: OpenAI(api_key=api_key, base_url=base_url, timeout=_AGENT_LLM_TIMEOUT_SECONDS),
+            # max_retries=0：隐式重试会让总耗时不可估（应用层已统一管理重试与预算）
+            lambda: OpenAI(
+                api_key=api_key, base_url=base_url, timeout=_AGENT_LLM_TIMEOUT_SECONDS, max_retries=0
+            ),
         )
 
     def chat(
@@ -198,17 +233,26 @@ class OpenAICompatAgentClient:
     ) -> AgentLLMResponse:
         _ = intent  # 工具内部调用的意图标记仅用于测试分流，生产实现忽略
         started = time.perf_counter()
+        deadline = self._deadline or TurnDeadline(self.retry_policy.total_budget_seconds)
         response = None
         choice = None
         last_exc: Exception | None = None
         max_retries = self.retry_policy.max_retries
         for attempt in range(max_retries + 1):
             try:
+                usable = deadline.remaining() - self._reserve_seconds
+                if usable <= MIN_REQUEST_TIMEOUT_SECONDS:
+                    raise AgentLLMError(
+                        f"本轮时间预算不足（剩余 {deadline.remaining():.0f}s，"
+                        f"需为降级保留 {self._reserve_seconds:.0f}s）"
+                    )
                 response = self._client.chat.completions.create(
                     model=self.model,
                     messages=messages,  # type: ignore[arg-type]
                     tools=tools or None,  # type: ignore[arg-type]
                     temperature=0.4,
+                    # 单次请求不得超过剩余可用预算（含本客户端保留份额）
+                    timeout=min(_AGENT_LLM_TIMEOUT_SECONDS, usable),
                 )
                 # 空载荷必须在 try 内提取：否则 IndexError 会绕过重试与 AgentLLMError 处理
                 choice = _extract_choice(response)
@@ -219,7 +263,7 @@ class OpenAICompatAgentClient:
                 if (
                     not _is_transient_llm_error(exc)
                     or attempt >= max_retries
-                    or self.retry_policy.budget_exhausted(elapsed)
+                    or deadline.remaining() - self._reserve_seconds <= MIN_REQUEST_TIMEOUT_SECONDS
                 ):
                     raise AgentLLMError(f"设计师模型调用失败: {exc}") from exc
                 delay = self.retry_policy.delay_for(attempt)
@@ -305,17 +349,27 @@ def build_agent_llm_client() -> AgentLLMClient:
         )
     if not config.api_key:
         raise AgentLLMError("设计师 Agent 的供应商缺少 API Key，请在系统设置中补全")
+
+    has_fallback = bool(config.fallback_api_key and config.fallback_model)
+    # 整轮共享一个截止时间：主用 + 备用 + 退避都从同一预算里扣，总时长因此有上界
+    deadline = TurnDeadline(retry_policy.total_budget_seconds)
+    # 有备用时为它留出份额，主用不得把预算用光——否则"降级"只是纸面配置
+    primary_reserve = (
+        retry_policy.total_budget_seconds * (1 - DEFAULT_PRIMARY_RESERVE_FRACTION) if has_fallback else 0.0
+    )
     primary = OpenAICompatAgentClient(
         provider_name=config.provider_kind,
         api_key=config.api_key,
         base_url=config.base_url,
         model=config.model,
         retry_policy=retry_policy,
+        deadline=deadline,
+        reserve_seconds=primary_reserve,
     )
     # 降级是否可用看"有没有 key + 模型"，不能看 fallback_provider_profile_id：
     # 后者只在界面绑定路径产生，.env 直填（中转场景）永远拿不到它——
     # 历史实现因此在 env-first 下静默丢弃用户已经配好的降级链。
-    if not config.fallback_api_key or not config.fallback_model:
+    if not has_fallback:
         if config.fallback_provider_profile_id:
             raise AgentLLMError("降级供应商配置不完整（缺 API Key 或 fallback_model），请在系统设置中补全")
         return primary
@@ -327,5 +381,6 @@ def build_agent_llm_client() -> AgentLLMClient:
         base_url=config.fallback_base_url or config.base_url,
         model=config.fallback_model,
         retry_policy=retry_policy,
+        deadline=deadline,
     )
     return FallbackAgentLLMClient(primary=primary, fallback=fallback)

@@ -55,7 +55,9 @@ def _format_default(field) -> str:
 
 def _env_line(name: str, field) -> str:
     if _is_sensitive(name):
-        return f"# {name}=                     # {_format_default(field)}；在此填写你的值"
+        # 敏感字段连"默认值"都不落盘：默认值为空不代表将来为空，
+        # 一旦有人给某个密钥类字段设了默认值，这里就会把它写进版本库。
+        return f"# {name}=                     # 在此填写你的值（内容不在此文件出现）"
     return f"{name}={field.default if field.default not in (None, '') else ''}"
 
 

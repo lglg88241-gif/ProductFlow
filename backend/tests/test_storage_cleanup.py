@@ -123,7 +123,11 @@ def test_run_cleanup_dry_run_reports_without_deleting(db_session, tmp_path: Path
     assert (tmp_path / "exports/old-grid.zip").exists()
 
 
-def test_run_cleanup_real_run_deletes_only_orphans_and_stale_exports(db_session, tmp_path: Path) -> None:
+def test_run_cleanup_real_run_deletes_only_orphans_and_stale_exports(
+    db_session, tmp_path: Path, monkeypatch
+) -> None:
+    # 物理删除默认被策略闸门拦住，测试需显式授权（与运维开启清理一致的路径）
+    monkeypatch.setenv("MEDIA_CLEANUP_ALLOW_DELETE", "1")
     _build_storage_tree(tmp_path)
     db_session.add_all(
         [
@@ -157,6 +161,7 @@ def test_run_cleanup_real_run_deletes_only_orphans_and_stale_exports(db_session,
 def test_run_cleanup_never_deletes_referenced_files_even_with_zero_retention(
     db_session, tmp_path: Path, monkeypatch
 ) -> None:
+    monkeypatch.setenv("MEDIA_CLEANUP_ALLOW_DELETE", "1")
     _build_storage_tree(tmp_path)
     db_session.add_all(
         [
@@ -248,3 +253,21 @@ def test_run_cleanup_works_with_empty_reference_set(tmp_path: Path) -> None:
     assert report["referenced_path_count"] == 0
     assert report["orphan_file_count"] == 1
     assert report["stale_export_count"] == 0
+
+
+def test_run_cleanup_is_inventory_only_by_default(db_session, tmp_path: Path, monkeypatch) -> None:
+    """审计要求：清理默认只盘点。即使调用方传 dry_run=False，未显式授权也不得删文件。"""
+    from productflow_backend.infrastructure.storage_cleanup import run_cleanup
+
+    monkeypatch.delenv("MEDIA_CLEANUP_ALLOW_DELETE", raising=False)
+    _build_storage_tree(tmp_path)
+    orphan = tmp_path / "products" / "p2" / "posters" / "b.png"  # 无引用 → 孤儿
+    assert orphan.exists()
+
+    report = run_cleanup(db_session, dry_run=False, storage_root=tmp_path)
+
+    assert report["deletion_blocked_by_policy"] is True
+    assert report["dry_run"] is True, "被策略拦下时报告应如实标注为未删除"
+    assert report["deleted_file_count"] == 0
+    assert orphan.exists(), "未授权的清理必须保留文件"
+    assert report["orphan_file_count"] >= 1, "仍应盘点出可清理项供人工审查"

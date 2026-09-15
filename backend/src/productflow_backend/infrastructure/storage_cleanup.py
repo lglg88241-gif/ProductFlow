@@ -323,6 +323,17 @@ def _remove_empty_variant_dirs(deleted: Iterable[CleanupCandidate]) -> None:
             continue
 
 
+def deletion_enabled_by_policy() -> bool:
+    """物理删除是否被运维显式授权。
+
+    默认关闭：清理任务只盘点并报告，不删任何文件。理由是本模块的引用集合是
+    对四张媒体表的"尽力而为"快照，而删除不可逆——在引用完整性、路径归一化与
+    回收站机制全部落地并经演练验证之前，不允许无人监督地删用户素材。
+    需要清理时由运维显式设置 MEDIA_CLEANUP_ALLOW_DELETE=1。
+    """
+    return os.getenv("MEDIA_CLEANUP_ALLOW_DELETE", "").strip() == "1"
+
+
 def run_cleanup(
     db: Session,
     *,
@@ -331,8 +342,9 @@ def run_cleanup(
 ) -> dict[str, object]:
     """媒体存储清理入口：返回报告 dict（扫描数/可删数/释放字节）。
 
-    默认 ``dry_run=True`` 只出报告；``dry_run=False`` 时执行删除，但每个文件
-    删除前仍会对照引用集合做最后一道校验，命中引用一律跳过。
+    默认 ``dry_run=True`` 只出报告。即使调用方传 ``dry_run=False``，只要运维没有
+    显式开启 ``MEDIA_CLEANUP_ALLOW_DELETE=1``，本次仍按只盘点执行（报告里会标注
+    被拒绝的原因）——防止"某个调用方忘了传 dry_run"演变成误删。
     """
     resolved_root = Path(storage_root or get_settings().storage_root).resolve()
     referenced = collect_referenced_media_paths(db)
@@ -355,7 +367,8 @@ def run_cleanup(
     deleted_count = 0
     deleted_bytes = 0
     failed_deletions: list[str] = []
-    if not dry_run:
+    policy_blocked = bool(not dry_run and not deletion_enabled_by_policy())
+    if not dry_run and not policy_blocked:
         for candidate in (*orphans, *stale_exports):
             # 删除前最后一道校验：任何键命中引用集合立即跳过
             if _normalize_relative_path(candidate.relative_path) in direct_keys:
@@ -372,7 +385,8 @@ def run_cleanup(
             _remove_empty_variant_dirs(orphans)
 
     return {
-        "dry_run": dry_run,
+        "dry_run": dry_run or policy_blocked,
+        "deletion_blocked_by_policy": policy_blocked,
         "storage_root": str(resolved_root),
         "media_roots": [str(root) for root in media_roots],
         "scanned_file_count": scanned,

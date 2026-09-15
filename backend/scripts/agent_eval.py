@@ -56,6 +56,7 @@ class Scenario:
 class Outcome:
     scenario: Scenario
     tools: list[str] = field(default_factory=list)
+    failed_tools: list[str] = field(default_factory=list)
     questions: int = 0
     leaks: list[str] = field(default_factory=list)
     latency_s: float = 0.0
@@ -101,11 +102,10 @@ SCENARIOS: list[Scenario] = [
         expect_any={
             "recommend_designs",
             "write_copy",
-            "generate_image",
             "search_assets",
             "analyze_template",
         },
-        note="模糊需求必须动手（推荐/文案/检索），而不是纯聊天",
+        note="模糊需求必须动手（推荐/文案/检索），而不是纯聊天；不含生图以保持默认档免费",
     ),
     Scenario(
         sid="label-quantity",
@@ -167,7 +167,14 @@ def _run_scenario(client: httpx.Client, scenario: Scenario) -> Outcome:
             return outcome
         response.raise_for_status()
         payload = response.json()
-        outcome.tools = [event["tool"] for event in payload.get("tool_events", [])]
+        events = payload.get("tool_events", [])
+        outcome.tools = [event["tool"] for event in events]
+        # 只看工具名会把"调了但执行失败"算成通过——这里记录失败的工具
+        outcome.failed_tools = [
+            event["tool"]
+            for event in events
+            if str((event.get("result") or {}).get("status", "")).lower() in {"error", "failed"}
+        ]
 
         detail = client.get(f"/api/agent/sessions/{session_id}").json()
         messages = detail.get("messages", [])
@@ -186,6 +193,11 @@ def _run_scenario(client: httpx.Client, scenario: Scenario) -> Outcome:
         forbidden_hit = set(outcome.tools) & scenario.forbid
         if forbidden_hit:
             outcome.failures.append(f"不该调用 {sorted(forbidden_hit)}")
+        expected_hit = set(outcome.tools) & scenario.expect_any
+        if expected_hit and expected_hit <= set(outcome.failed_tools):
+            outcome.failures.append(f"期望的工具执行失败: {sorted(expected_hit)}")
+        if outcome.failed_tools and not expected_hit:
+            outcome.failures.append(f"工具执行失败: {sorted(set(outcome.failed_tools))}")
         if outcome.questions > scenario.max_questions:
             outcome.failures.append(f"追问 {outcome.questions} 次，超出澄清预算 {scenario.max_questions}")
         if outcome.leaks:
