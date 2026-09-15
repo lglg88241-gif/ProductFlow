@@ -36,6 +36,9 @@ class AgentLLMError(RuntimeError):
 # 客户端本身不读全局配置（否则单独构造客户端就得备齐 DATABASE_URL 等全部环境）。
 DEFAULT_TRANSIENT_RETRIES = 3
 DEFAULT_RETRY_BASE_DELAY_SECONDS = 1.0
+# 整轮 LLM 调用的总时长预算：必须低于网关（nginx proxy_read_timeout 300s），
+# 否则"重试次数 × 单次超时"会让请求在网关侧被切断成 504。
+DEFAULT_TOTAL_BUDGET_SECONDS = 240.0
 
 
 @dataclass(frozen=True)
@@ -49,16 +52,43 @@ class TransientRetryPolicy:
 
     max_retries: int = DEFAULT_TRANSIENT_RETRIES
     base_delay_seconds: float = DEFAULT_RETRY_BASE_DELAY_SECONDS
+    total_budget_seconds: float = DEFAULT_TOTAL_BUDGET_SECONDS
 
     def delay_for(self, attempt: int) -> float:
         return self.base_delay_seconds * (2**attempt) + random.uniform(0, self.base_delay_seconds)
+
+    def budget_exhausted(self, elapsed_seconds: float) -> bool:
+        """总预算是否已耗尽——耗尽后不再重试，避免把请求拖到网关超时。"""
+        return elapsed_seconds >= self.total_budget_seconds
 
 
 _TRANSIENT_STATUS_CODES = {500, 502, 503, 504, 520, 521, 522, 523, 524}
 
 
+class EmptyLLMResponseError(Exception):
+    """供应商返回 HTTP 200 但载荷里没有 choices（中转站空响应）。
+
+    与生图侧 `_parse_with_empty_output_retry` 同类问题：中转站偶发回空载荷，
+    若直接取 choices[0] 会抛 IndexError，逃过 AgentLLMError 处理变成 500。
+    这里显式建模为"可重试的瞬时故障"。
+    """
+
+
+def _extract_choice(response: Any) -> Any:
+    """取出首个 choice；空载荷抛 EmptyLLMResponseError 以便走同一重试路径。"""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise EmptyLLMResponseError("供应商返回空响应（无 choices）")
+    choice = getattr(choices[0], "message", None)
+    if choice is None:
+        raise EmptyLLMResponseError("供应商返回的 choice 缺少 message")
+    return choice
+
+
 def _is_transient_llm_error(exc: Exception) -> bool:
     """仅网络类/网关类瞬时故障可重试；超时（等待成本高）与 4xx 输入错误不重试。"""
+    if isinstance(exc, EmptyLLMResponseError):
+        return True
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and status in _TRANSIENT_STATUS_CODES:
         return True
@@ -169,6 +199,7 @@ class OpenAICompatAgentClient:
         _ = intent  # 工具内部调用的意图标记仅用于测试分流，生产实现忽略
         started = time.perf_counter()
         response = None
+        choice = None
         last_exc: Exception | None = None
         max_retries = self.retry_policy.max_retries
         for attempt in range(max_retries + 1):
@@ -179,23 +210,30 @@ class OpenAICompatAgentClient:
                     tools=tools or None,  # type: ignore[arg-type]
                     temperature=0.4,
                 )
+                # 空载荷必须在 try 内提取：否则 IndexError 会绕过重试与 AgentLLMError 处理
+                choice = _extract_choice(response)
                 break
             except Exception as exc:  # noqa: BLE001 - 供应商异常统一转译为 AgentLLMError
                 last_exc = exc
-                if not _is_transient_llm_error(exc) or attempt >= max_retries:
+                elapsed = time.perf_counter() - started
+                if (
+                    not _is_transient_llm_error(exc)
+                    or attempt >= max_retries
+                    or self.retry_policy.budget_exhausted(elapsed)
+                ):
                     raise AgentLLMError(f"设计师模型调用失败: {exc}") from exc
                 delay = self.retry_policy.delay_for(attempt)
                 logger.warning(
-                    "设计师模型瞬时故障，重试: attempt=%s/%s error=%s delay_s=%.1f",
+                    "设计师模型瞬时故障，重试: attempt=%s/%s error=%s delay_s=%.1f elapsed_s=%.0f",
                     attempt + 1,
                     max_retries,
                     type(exc).__name__,
                     delay,
+                    elapsed,
                 )
                 time.sleep(delay)
-        if response is None:
+        if response is None or choice is None:
             raise AgentLLMError(f"设计师模型调用失败: {last_exc}") from last_exc
-        choice = response.choices[0].message
         tool_calls: list[AgentToolCall] = []
         for call in choice.tool_calls or []:
             function = call.function
@@ -258,6 +296,7 @@ def build_agent_llm_client() -> AgentLLMClient:
     retry_policy = TransientRetryPolicy(
         max_retries=settings.agent_llm_transient_retries,
         base_delay_seconds=settings.agent_llm_retry_base_delay_seconds,
+        total_budget_seconds=settings.agent_llm_total_budget_seconds,
     )
     config = resolve_agent_provider_config()
     if config.provider_kind == "mock":

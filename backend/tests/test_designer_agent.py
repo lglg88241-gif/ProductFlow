@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from helpers import _enable_deletion, _login
 
@@ -534,3 +535,58 @@ def test_sync_and_stream_paths_agree_on_same_script(configured_env: Path, instal
     stream_tools, stream_stage = _run(use_stream=True)
     assert sync_tools == stream_tools == ["write_copy"], (sync_tools, stream_tools)
     assert sync_stage == stream_stage == "produce", (sync_stage, stream_stage)
+
+
+def test_agent_llm_empty_payload_is_retried_not_500() -> None:
+    """回归：中转站 200 但 choices 为空时必须走重试，而不是抛 IndexError 变成 500。
+
+    真实故障：连续 5 个评测场景各在 ~200s 后返回 500，根因是 llm.py 直接取
+    choices[0]——异常类型逃过路由的 AgentLLMError 处理。
+    """
+    from productflow_backend.application.designer_agent.llm import (
+        AgentLLMError,
+        OpenAICompatAgentClient,
+        TransientRetryPolicy,
+    )
+
+    class _EmptyPayload:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            return type("R", (), {"choices": [], "model": "m"})()
+
+    class _EmptyThenOk:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return type("R", (), {"choices": [], "model": "m"})()
+            message = type("M", (), {"content": "ok", "tool_calls": None})()
+            return type("R", (), {"choices": [type("C", (), {"message": message})()], "model": "m"})()
+
+    def _client_with(completions):
+        client = OpenAICompatAgentClient(
+            provider_name="t",
+            api_key="k",
+            base_url="http://x",
+            model="m",
+            retry_policy=TransientRetryPolicy(max_retries=2, base_delay_seconds=0.01),
+        )
+        client._client = type("C", (), {"chat": type("Ch", (), {"completions": completions})()})()
+        return client
+
+    # 空载荷后恢复 → 重试成功
+    flaky = _EmptyThenOk()
+    response = _client_with(flaky).chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert response.content == "ok"
+    assert flaky.calls == 2, "空载荷应触发一次重试"
+
+    # 持续空载荷 → 抛出 AgentLLMError（而非 IndexError），且重试次数用满
+    always_empty = _EmptyPayload()
+    with pytest.raises(AgentLLMError):
+        _client_with(always_empty).chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert always_empty.calls == 3, "重试预算应用满（1 次首发 + 2 次重试）"

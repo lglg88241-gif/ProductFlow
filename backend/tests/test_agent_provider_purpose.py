@@ -402,3 +402,50 @@ def test_retry_budget_is_configurable(configured_env, monkeypatch) -> None:
         assert get_settings().agent_llm_transient_retries == 5
     finally:
         get_settings.cache_clear()
+
+
+def test_retry_stops_when_total_budget_exhausted(configured_env) -> None:
+    """总预算耗尽后不再重试——否则"重试次数 × 单次超时"会超过网关超时（实测 504）。"""
+    from productflow_backend.application.designer_agent.llm import (
+        AgentLLMError,
+        OpenAICompatAgentClient,
+        TransientRetryPolicy,
+    )
+
+    class _Always502(Exception):
+        status_code = 502
+
+    class _Completions:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, **kwargs):
+            self.calls += 1
+            raise _Always502("502 bad gateway")
+
+    def _client(budget: float):
+        client = OpenAICompatAgentClient(
+            provider_name="t",
+            api_key="k",
+            base_url="http://x",
+            model="m",
+            retry_policy=TransientRetryPolicy(
+                max_retries=5, base_delay_seconds=0.01, total_budget_seconds=budget
+            ),
+        )
+        completions = _Completions()
+        client._client = type("C", (), {"chat": type("Ch", (), {"completions": completions})()})()
+        return client, completions
+
+    # 预算充足（相对重试次数）→ 重试用满
+    client, completions = _client(10.0)
+    with pytest.raises(AgentLLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert completions.calls == 6, "预算充足时应把重试次数用满"
+
+    # 预算已被消耗（0.0 秒 = 立刻视为耗尽）→ 只尝试一次就放弃
+    client, completions = _client(0.0)
+    with pytest.raises(AgentLLMError):
+        client.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
+    assert completions.calls == 1, "预算耗尽后不应继续重试"
+
