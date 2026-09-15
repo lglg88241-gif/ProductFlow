@@ -11,7 +11,10 @@ from productflow_backend.infrastructure.db.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers=False：fileConfig 默认会把当时已存在、但 alembic.ini
+    # 未声明的 logger 全部置为 disabled（含应用自身与 pytest 的 logger），
+    # 导致同进程内后续的日志（如限速降级告警）被静默吞掉。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

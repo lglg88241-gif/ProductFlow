@@ -45,14 +45,10 @@ def test_full_operator_journey_from_login_to_deliverable_cleanup(configured_env:
     from productflow_backend.presentation.api import create_app
 
     with TestClient(create_app()) as client:
-        # 1. 启动即健康，受保护 API 未登录不可见
+        # 1. 启动即健康；healthz 收敛为最小存活探针，不暴露门禁/供应商等侦察信息
         health = client.get("/healthz")
         assert health.status_code == 200
-        health_payload = health.json()
-        assert health_payload["status"] == "ok"
-        assert health_payload["admin_access_required"] is True
-        # P1-5：healthz 同时暴露供应商摘要（不含密钥）
-        assert set(health_payload["providers"]) == {"agent", "image"}
+        assert health.json() == {"status": "ok"}
         assert client.get("/api/products").status_code == 401
 
         # 2. 错误密钥拒绝，正确密钥登录

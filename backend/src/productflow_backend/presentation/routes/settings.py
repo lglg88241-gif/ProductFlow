@@ -47,7 +47,7 @@ from productflow_backend.infrastructure.provider_config import (
     validate_provider_profile_contract,
 )
 from productflow_backend.presentation.deps import get_session, require_admin
-from productflow_backend.presentation.rate_limit import client_ip, settings_unlock_rate_limiter
+from productflow_backend.presentation.rate_limit import client_ip, entry_rate_limiter, settings_unlock_rate_limiter
 from productflow_backend.presentation.schemas.settings import (
     ConfigItemResponse,
     ConfigOptionResponse,
@@ -502,10 +502,12 @@ def get_settings_lock_state_endpoint(request: Request) -> SettingsLockStateRespo
 
 @router.post("/unlock", response_model=SettingsLockStateResponse)
 def unlock_settings_endpoint(payload: SettingsUnlockRequest, request: Request) -> SettingsLockStateResponse:
+    # 入口频率限制（审计 A1）：先于令牌校验逻辑
+    ip = client_ip(request)
+    entry_rate_limiter.hit(ip)
     expected_token = (get_settings().settings_access_token or "").strip()
     if not expected_token:
         raise HTTPException(status_code=503, detail="设置解锁令牌未配置，请联系管理员")
-    ip = client_ip(request)
     settings_unlock_rate_limiter.check(ip)
     if not secrets.compare_digest(payload.token, expected_token):
         settings_unlock_rate_limiter.record(ip)

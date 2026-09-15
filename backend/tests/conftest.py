@@ -22,6 +22,23 @@ def _reset_runtime_settings_cache():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_rate_limit_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """限速器每条用例回到内存后端并清零（审计 A1）。
+
+    - RATE_LIMIT_BACKEND=memory：测试永不连接真实 Redis（后端选择/Redis 集成
+      由专门测试显式构造存储，不依赖模块级实例的惰性解析）；
+    - 每条用例前后清空全部限速状态：登录/解锁/入口计数互不污染，
+      否则入口频率限制（每 IP 每分钟）会跨用例累计并产生伪 429。
+    """
+    monkeypatch.setenv("RATE_LIMIT_BACKEND", "memory")
+    from productflow_backend.presentation import rate_limit as rate_limit_module
+
+    rate_limit_module.reset_all_rate_limiters()
+    yield
+    rate_limit_module.reset_all_rate_limiters()
+
+
+@pytest.fixture(autouse=True)
 def _reset_shared_openai_client_caches():
     """模块级 OpenAI 客户端缓存测试间清空：被 monkeypatch 的假 OpenAI 每条用例都重新构造。"""
 

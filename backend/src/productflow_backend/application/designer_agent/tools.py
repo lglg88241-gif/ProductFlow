@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +30,9 @@ from productflow_backend.application.image_sessions import (
 )
 from productflow_backend.config import normalize_image_generation_size
 from productflow_backend.infrastructure.db.models import AgentSession
+from productflow_backend.infrastructure.safe_errors import classify_error, sanitize_error_text
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 
@@ -248,7 +252,14 @@ def execute_tool(
     try:
         return handler(ctx)
     except Exception as exc:  # noqa: BLE001 - 面向用户的工具错误必须转译
-        return {"status": "error", "message": _friendly_generation_error(exc), "detail": str(exc)[:200]}
+        # 原始异常可能含内部路径/供应商响应片段：绝不进入 LLM 上下文或落库消息，
+        # 抹除密钥后的摘要只进日志；LLM/前端只见人话 + 结构化错误分类。
+        logger.warning(
+            "Agent 工具执行失败: tool=%s error=%s",
+            name,
+            sanitize_error_text(f"{type(exc).__name__}: {exc}"),
+        )
+        return {"status": "error", "message": _friendly_generation_error(exc), "error": classify_error(exc)}
 
 
 def _template_style_block(entry: Any) -> str:

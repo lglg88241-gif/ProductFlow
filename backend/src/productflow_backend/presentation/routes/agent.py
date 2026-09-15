@@ -29,6 +29,8 @@ from productflow_backend.application.designer_agent.loop import (
 )
 from productflow_backend.domain.errors import BusinessError
 from productflow_backend.infrastructure.db.models import CopyReport
+from productflow_backend.infrastructure.logging import get_request_id
+from productflow_backend.infrastructure.safe_errors import classify_error
 from productflow_backend.presentation.deps import get_session, require_admin, require_deletion_enabled
 from productflow_backend.presentation.image_variants import serve_image_variant
 from productflow_backend.presentation.schemas.agent import (
@@ -380,7 +382,16 @@ def send_agent_message_endpoint(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AgentLLMError as exc:
         logger.warning("设计师模型调用失败（非流式端点兜底）: %s", exc)
-        raise HTTPException(status_code=503, detail=_LLM_FAILURE_USER_MESSAGE) from exc
+        # detail 保持人话（前端契约）；错误分类与请求 ID 走响应头，便于前端/排障分流
+        raise HTTPException(
+            status_code=503,
+            detail=_LLM_FAILURE_USER_MESSAGE,
+            headers={
+                "X-Error-Code": "provider_unavailable",
+                "X-Retryable": "true",
+                "X-Request-Id": get_request_id(),
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     session.expire_all()
@@ -412,6 +423,9 @@ def send_agent_message_stream_endpoint(
 
     import json as _json
 
+    # 心跳泵线程不继承请求 contextvar：请求 ID 必须在端点体内捕获后闭包传入
+    request_id = get_request_id()
+
     def _frame(event: str, data: dict) -> str:
         payload = _json.dumps(data, ensure_ascii=False)
         return "event: " + event + "\ndata: " + payload + "\n\n"
@@ -427,9 +441,16 @@ def send_agent_message_stream_endpoint(
             if isinstance(exc, AgentLLMError):
                 logger.warning("设计师模型调用失败（流式端点兜底）: %s", exc)
                 user_message = _LLM_FAILURE_USER_MESSAGE
+                code, retryable = "provider_unavailable", True
             else:
                 user_message = str(exc)
-            yield _frame("error", {"message": user_message})
+                classified = classify_error(exc)
+                code, retryable = classified["code"], classified["retryable"]
+            # message 保持人话不变；code/retryable/request_id 为新增结构化字段
+            yield _frame(
+                "error",
+                {"message": user_message, "code": code, "retryable": retryable, "request_id": request_id},
+            )
             yield _frame("done", {"session_id": agent_session_id, "stage": "", "image_session_id": None,
                                   "tool_events": [], "pending_generation_tasks": []})
 

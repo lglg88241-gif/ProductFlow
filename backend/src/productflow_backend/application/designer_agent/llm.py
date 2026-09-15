@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import random
-import re
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
@@ -12,6 +11,7 @@ from openai import OpenAI
 
 from productflow_backend.infrastructure.openai_client_cache import KeyedClientCache
 from productflow_backend.infrastructure.provider_config import resolve_agent_provider_config
+from productflow_backend.infrastructure.safe_errors import sanitize_error_text
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,7 @@ _AGENT_LLM_TIMEOUT_SECONDS = 120.0
 # 按 (api_key, base_url, timeout) 复用 OpenAI 客户端：避免每轮重建 httpx 连接池
 _OPENAI_CLIENTS = KeyedClientCache()
 
-# 降级日志只输出错误摘要：限长并抹除疑似密钥片段，严防 API key 进入日志
-_SENSITIVE_KEY_PATTERN = re.compile(
-    r"(?i)(?:sk-[A-Za-z0-9_.-]{6,}|api[-_]?key\s*[=:]\s*\S+|authorization[:\s]*bearer\s+\S+)"
-)
+# 降级日志只输出错误摘要：密钥抹除正则已迁移至 infrastructure/safe_errors.py（公开 SENSITIVE_KEY_PATTERN）
 _ERROR_SUMMARY_MAX_CHARS = 200
 
 
@@ -126,8 +123,7 @@ def _is_transient_llm_error(exc: Exception) -> bool:
 
 def _summarize_error(exc: Exception, *, limit: int = _ERROR_SUMMARY_MAX_CHARS) -> str:
     """生成可安全落日志的错误摘要：限长并抹除疑似密钥片段。"""
-    text = _SENSITIVE_KEY_PATTERN.sub("[已抹除]", f"{type(exc).__name__}: {exc}")
-    return text[:limit]
+    return sanitize_error_text(f"{type(exc).__name__}: {exc}", limit=limit)
 
 
 def _parse_usage(usage: Any) -> dict[str, int] | None:

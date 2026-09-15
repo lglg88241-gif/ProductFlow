@@ -5,7 +5,7 @@ import secrets
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from productflow_backend.config import get_runtime_settings, get_settings
-from productflow_backend.presentation.rate_limit import client_ip, login_rate_limiter
+from productflow_backend.presentation.rate_limit import client_ip, entry_rate_limiter, login_rate_limiter
 from productflow_backend.presentation.schemas.auth import (
     SessionCreateRequest,
     SessionResponse,
@@ -17,10 +17,12 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.post("/session", response_model=SessionResponse)
 def create_session(payload: SessionCreateRequest, request: Request) -> SessionResponse:
+    # 入口频率限制（审计 A1）：先于一切鉴权逻辑，含关闭门禁的本地验收路径
+    ip = client_ip(request)
+    entry_rate_limiter.hit(ip)
     if not get_runtime_settings().admin_access_required:
         request.session["is_authenticated"] = True
         return SessionResponse()
-    ip = client_ip(request)
     login_rate_limiter.check(ip)
     settings = get_settings()
     if not secrets.compare_digest(payload.admin_key.encode("utf-8"), settings.admin_access_key.encode("utf-8")):

@@ -38,6 +38,11 @@ def reset_request_id(token: Token[str]) -> None:
     _request_id_var.reset(token)
 
 
+def get_request_id() -> str:
+    """读取当前上下文的请求 ID；无请求上下文时返回占位符（如 worker 线程/SSE 泵线程）。"""
+    return _request_id_var.get()
+
+
 def set_workflow_run_id(workflow_run_id: str) -> Token[str]:
     return _workflow_run_id_var.set(workflow_run_id)
 

@@ -316,12 +316,14 @@ def test_production_startup_allows_admin_gate_enabled(
         invalidate_runtime_settings_cache()
 
 
-def test_healthz_provider_summary_hides_topology(configured_env: Path) -> None:
-    """healthz 供应商摘要不再暴露 host/base_url；降级仅保留存在性布尔。"""
+def test_admin_diagnostics_provider_summary_hides_topology(configured_env: Path) -> None:
+    """供应商摘要收敛到 /api/admin/diagnostics：不暴露 host/base_url；降级仅保留存在性布尔。"""
     from productflow_backend.presentation.api import create_app
 
     client = TestClient(create_app())
-    payload = client.get("/healthz").json()
+    assert client.get("/api/admin/diagnostics").status_code == 401
+    _login(client)
+    payload = client.get("/api/admin/diagnostics").json()
     providers = payload["providers"]
     assert set(providers) == {"agent", "image"}
     serialized = json.dumps(providers)

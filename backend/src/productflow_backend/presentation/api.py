@@ -21,14 +21,13 @@ from productflow_backend.infrastructure.logging import (
 from productflow_backend.infrastructure.provider_config import (
     ensure_provider_config_bootstrapped,
     provider_config_tables_available,
-    resolve_agent_provider_config,
-    resolve_image_provider_config,
 )
 from productflow_backend.infrastructure.queue import (
     recover_unfinished_image_session_generation_tasks,
     recover_unfinished_workflow_runs,
 )
 from productflow_backend.presentation.errors import register_exception_handlers
+from productflow_backend.presentation.routes.admin_diagnostics import router as admin_diagnostics_router
 from productflow_backend.presentation.routes.agent import router as agent_router
 from productflow_backend.presentation.routes.auth import router as auth_router
 from productflow_backend.presentation.routes.copy_inputs import router as copy_inputs_router
@@ -49,6 +48,20 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings)
 
+    # 门禁检查前置：在构建 app/中间件/路由之前就拒绝危险配置，
+    # 让启动编排（容器/进程管理器）在 create_app 阶段即收到明确失败信号，
+    # 而不是应用先完成创建、再在 lifespan 里死掉。
+    if not get_runtime_settings().admin_access_required:
+        # production 下关闭门禁属于致命配置错误：直接拒绝启动，不提供绕过开关。
+        # 本地验收请使用 APP_ENV=development（见 .env.example），而不是在 production 上开后门——
+        # 后门一旦存在，任何"临时关一下"都会在生产环境长期驻留。
+        if get_settings().app_env.strip().lower() == "production":
+            raise RuntimeError(
+                "production 环境必须开启管理员访问密钥（ADMIN_ACCESS_REQUIRED=true），已拒绝启动。"
+                "本地 HTTP 验收请设置 APP_ENV=development"
+            )
+        logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         cleanup_old_logs(settings)
@@ -66,16 +79,6 @@ def create_app() -> FastAPI:
             bootstrap_builtin_assets()
         except SQLAlchemyError:
             logging.getLogger(__name__).warning("内置素材库样板导入失败，跳过（下次启动重试）", exc_info=True)
-        if not get_runtime_settings().admin_access_required:
-            # production 下关闭门禁属于致命配置错误：直接拒绝启动，不提供绕过开关。
-            # 本地验收请使用 APP_ENV=development（见 .env.example），而不是在 production 上开后门——
-            # 后门一旦存在，任何"临时关一下"都会在生产环境长期驻留。
-            if get_settings().app_env.strip().lower() == "production":
-                raise RuntimeError(
-                    "production 环境必须开启管理员访问密钥（ADMIN_ACCESS_REQUIRED=true），已拒绝启动。"
-                    "本地 HTTP 验收请设置 APP_ENV=development"
-                )
-            logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
         if not get_settings().session_cookie_secure:
             logging.getLogger(__name__).warning(
                 "SESSION_COOKIE_SECURE 未开启：会话 Cookie 将通过非加密连接传输（公网部署请配置 HTTPS 并开启）"
@@ -100,14 +103,13 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
 
     @app.get("/healthz")
-    def healthcheck() -> dict[str, object]:
-        return {
-            "status": "ok",
-            "admin_access_required": get_runtime_settings().admin_access_required,
-            "providers": _provider_status_summary(),
-        }
+    def healthcheck() -> dict[str, str]:
+        # 最小存活探针：只回答"进程活着"。门禁状态、供应商摘要等部署细节
+        # 一律不对外暴露（未鉴权的侦察面），诊断信息收敛到 /api/admin/diagnostics。
+        return {"status": "ok"}
 
     app.include_router(agent_router)
+    app.include_router(admin_diagnostics_router)
     app.include_router(auth_router)
     app.include_router(copy_inputs_router)
     app.include_router(generation_queue_router)
@@ -118,31 +120,6 @@ def create_app() -> FastAPI:
     app.include_router(image_sessions_router)
     app.include_router(settings_router)
     return app
-
-
-def _provider_status_summary() -> dict[str, object]:
-    """当前生效的供应商摘要（不含任何密钥，也不暴露 host/base_url 等部署拓扑信息）。"""
-    summary: dict[str, object] = {}
-    try:
-        agent = resolve_agent_provider_config()
-        summary["agent"] = {
-            "kind": agent.provider_kind,
-            "model": agent.model,
-            "has_key": bool(agent.api_key),
-            "has_fallback": bool(agent.fallback_api_key and agent.fallback_model),
-        }
-    except Exception as exc:  # noqa: BLE001 - 健康检查绝不因供应商配置问题失败
-        summary["agent"] = {"error": type(exc).__name__}
-    try:
-        image = resolve_image_provider_config()
-        summary["image"] = {
-            "kind": image.provider_kind,
-            "model": image.model,
-            "has_key": bool(image.api_key),
-        }
-    except Exception as exc:  # noqa: BLE001
-        summary["image"] = {"error": type(exc).__name__}
-    return summary
 
 
 class RequestIdMiddleware:

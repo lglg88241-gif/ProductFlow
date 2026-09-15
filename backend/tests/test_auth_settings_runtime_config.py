@@ -1512,7 +1512,9 @@ def test_production_rejects_disabling_admin_access_via_runtime_config(
     assert allowed.status_code == 200
 
 
-def test_healthz_reports_runtime_auth_flag(configured_env: Path) -> None:
+def test_runtime_auth_flag_changes_do_not_leak_into_healthz(configured_env: Path) -> None:
+    """healthz 收敛为最小存活探针：运行时门禁开关不再经由 healthz 暴露，
+    但开关本身仍须真实生效（未登录访问行为随之变化）。"""
     from productflow_backend.presentation.api import create_app
 
     app = create_app()
@@ -1520,11 +1522,14 @@ def test_healthz_reports_runtime_auth_flag(configured_env: Path) -> None:
     _login(client)
     _unlock_settings(client)
 
-    assert client.get("/healthz").json()["admin_access_required"] is True
+    assert client.get("/healthz").json() == {"status": "ok"}
 
     patched = client.patch("/api/settings", json={"values": {"admin_access_required": False}})
     assert patched.status_code == 200
-    assert client.get("/healthz").json()["admin_access_required"] is False
+    assert client.get("/healthz").json() == {"status": "ok"}
+
+    anon = TestClient(app)
+    assert anon.get("/api/products").status_code == 200, "关闭门禁后未登录访问应放行"
 
 
 def test_session_cookie_secure_defaults_by_environment(

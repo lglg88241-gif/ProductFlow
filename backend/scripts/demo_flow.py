@@ -111,6 +111,15 @@ class DemoSkip(Exception):
 # ======================================================================
 # 各阶段步骤
 # ======================================================================
+def _gate_enabled(r: DemoRunner) -> bool:
+    """healthz 已收敛为最小存活探针（只回 status），门禁状态改用未鉴权探测受保护 API 判断。
+
+    必须用独立请求（不带 runner 会话 Cookie），供已登录阶段的判断复用。
+    """
+    probe = httpx.get(f"{r.base_url}/api/products", timeout=10)
+    return probe.status_code == 401
+
+
 def phase_health_and_auth(r: DemoRunner) -> None:
     print("\n■ 阶段 0 · 健康检查与鉴权")
 
@@ -121,11 +130,12 @@ def phase_health_and_auth(r: DemoRunner) -> None:
         response.raise_for_status()
         payload = response.json()
         assert payload["status"] == "ok"
-        return f"admin_access_required={payload['admin_access_required']}"
+        assert set(payload) == {"status"}, "healthz 应收敛为最小存活探针"
+        return "healthz 最小存活探针 OK（部署细节已收敛至管理员诊断端点）"
 
     r.step("安全", "健康检查 /healthz", health)
 
-    gate_on = bool(r.client.get("/healthz").json().get("admin_access_required"))
+    gate_on = _gate_enabled(r)
 
     def anon_protected() -> str:
         response = r.client.get("/api/products")
@@ -502,7 +512,7 @@ def phase_cleanup(r: DemoRunner) -> None:
 
     r.step("清理", "删除商品（含存储清理）", delete_product)
 
-    gate_on = bool(r.client.get("/healthz").json().get("admin_access_required"))
+    gate_on = _gate_enabled(r)
 
     def logout() -> str:
         response = r.client.delete("/api/auth/session")

@@ -301,16 +301,19 @@ def test_image_env_variables_take_precedence_over_ui_binding(
 
 
 
-def test_healthz_reports_provider_summary_without_secrets(configured_env: Path) -> None:
-    """healthz 暴露供应商摘要（kind/model/host），绝不泄露密钥。"""
+def test_admin_diagnostics_reports_provider_summary_without_secrets(configured_env: Path) -> None:
+    """供应商摘要收敛到管理员诊断端点（kind/model/has_key），绝不泄露密钥；healthz 不再暴露。"""
     from productflow_backend.presentation.api import create_app
 
     client = TestClient(create_app())
-    payload = client.get("/healthz").json()
+    assert client.get("/api/admin/diagnostics").status_code == 401
+    _login(client)
+    payload = client.get("/api/admin/diagnostics").json()
     providers = payload["providers"]
     assert set(providers) == {"agent", "image"}
-    assert "api_key" not in json.dumps(providers)
+    assert "api_key" not in json.dumps(payload)
     assert providers["agent"]["kind"] in {"mock", "openai"}
+    assert "providers" not in client.get("/healthz").json()
 
 
 def test_env_first_fallback_is_wired_without_ui_profile_id(configured_env, monkeypatch) -> None:
