@@ -47,6 +47,7 @@ from productflow_backend.infrastructure.provider_config import (
     validate_provider_profile_contract,
 )
 from productflow_backend.presentation.deps import get_session, require_admin
+from productflow_backend.presentation.rate_limit import client_ip, settings_unlock_rate_limiter
 from productflow_backend.presentation.schemas.settings import (
     ConfigItemResponse,
     ConfigOptionResponse,
@@ -504,8 +505,12 @@ def unlock_settings_endpoint(payload: SettingsUnlockRequest, request: Request) -
     expected_token = (get_settings().settings_access_token or "").strip()
     if not expected_token:
         raise HTTPException(status_code=503, detail="设置解锁令牌未配置，请联系管理员")
+    ip = client_ip(request)
+    settings_unlock_rate_limiter.check(ip)
     if not secrets.compare_digest(payload.token, expected_token):
+        settings_unlock_rate_limiter.record(ip)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="设置解锁令牌不正确")
+    settings_unlock_rate_limiter.clear(ip)
     request.session["settings_unlocked"] = True
     return SettingsLockStateResponse(unlocked=True, configured=True)
 

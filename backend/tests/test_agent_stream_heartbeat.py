@@ -52,7 +52,16 @@ def test_heartbeat_generator_closes_and_joins_pump_thread() -> None:
             source_finished.set()
 
     gen = _heartbeat_frames(_slow_source(), heartbeat_interval=0.02)
-    assert next(gen).startswith("event: tick")
+    # 泵线程启动可能慢于心跳间隔，此时首个产出是心跳注释帧（正常行为）：
+    # 读到真实事件帧为止，避免对"第一帧"的时序断言造成负载相关的偶发失败。
+    first_real_frame = None
+    for _ in range(50):
+        frame = next(gen)
+        if frame.startswith("event:"):
+            first_real_frame = frame
+            break
+    assert first_real_frame is not None and first_real_frame.startswith("event: tick")
+
     gen.close()  # 模拟客户端断开触发 GeneratorExit
 
     assert source_finished.is_set(), "close 后后台线程应把事件源执行完（turn 继续落库的语义）"

@@ -50,7 +50,6 @@ export interface AgentToolEvent {
     grid_label?: string;
     matches?: AgentAssetEntry[];
     recommendations?: AgentDesignRecommendation[];
-    report?: AgentCopyReport;
     report_id?: string;
     preview?: string;
     changed_fields?: string[];
@@ -85,15 +84,6 @@ export interface AgentAssetEntry {
 
 export interface AgentDesignRecommendation extends AgentAssetEntry {
   why: string;
-}
-
-export interface AgentCopyReport {
-  headline?: string;
-  moments_caption?: string;
-  selling_points?: string[];
-  hashtags?: string[];
-  publishing_tips?: string;
-  [key: string]: unknown;
 }
 
 export interface AgentAssetListResponse {

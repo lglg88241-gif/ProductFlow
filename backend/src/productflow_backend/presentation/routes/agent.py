@@ -48,8 +48,6 @@ _LLM_FAILURE_USER_MESSAGE = "设计师模型暂时没有响应，请稍等片刻
 
 router = APIRouter(prefix="/api/agent", tags=["designer-agent"], dependencies=[Depends(require_admin)])
 
-logger = logging.getLogger(__name__)
-
 # SSE 心跳间隔（秒）：空闲超过该时长输出 ": ping" 注释帧，防止 nginx 默认 60s 空闲断开
 DEFAULT_SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
 

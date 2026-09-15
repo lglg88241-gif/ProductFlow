@@ -448,3 +448,44 @@ def test_agent_llm_retries_transient_gateway_errors() -> None:
     with _pytest.raises(AgentLLMError):
         client.chat(messages=[{"role": "user", "content": "hi"}], tools=[])
     assert bad_input.calls == 1, "4xx 不应重试"
+
+
+def test_agent_stream_nudge_executes_tool_call(configured_env: Path, install_scripted_llm) -> None:
+    """流式路径回归：督促重试给出的工具调用必须被执行（曾整体丢弃，导致"答应画图却不画"）。"""
+    from productflow_backend.application.designer_agent.loop import (
+        create_agent_session,
+        get_agent_session,
+        run_agent_turn_events,
+    )
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    install_scripted_llm(
+        [
+            AgentLLMResponse(content="我可以帮你做海报哦，告诉我更多吧。"),  # 首轮：纯文字（失职）
+            AgentLLMResponse(
+                content=None,
+                tool_calls=[
+                    AgentToolCall(call_id="call-copy-s", name="write_copy", arguments={"brief": "开业文案"})
+                ],
+            ),
+            AgentLLMResponse(
+                content=json.dumps([{"title": "A", "content": "文案A", "hashtags": []}], ensure_ascii=False)
+            ),
+            AgentLLMResponse(content="文案来啦。"),
+        ]
+    )
+    db = get_session_factory()()
+    try:
+        agent_session = create_agent_session(db)
+        events = list(run_agent_turn_events(db, agent_session_id=agent_session.id, user_content="给我三版开业文案"))
+
+        tool_results = [e for e in events if e["event"] == "tool_result"]
+        assert tool_results, "督促重试的工具调用应被执行并产出 tool_result 帧"
+        assert tool_results[0]["data"]["tool"] == "write_copy"
+
+        db.expire_all()
+        refreshed = get_agent_session(db, agent_session.id)
+        assert [m.tool_name for m in refreshed.messages if m.role == "tool"] == ["write_copy"]
+        assert refreshed.stage == "produce"
+    finally:
+        db.close()

@@ -368,6 +368,21 @@ def run_agent_turn_events(
             yield {"event": "error", "data": {"message": failure_text}}
             yield from _finish()
             return
+        if not response.tool_calls and not tool_nudged and not used_tools:
+            # 首轮只回文字未调工具：注入督促后重试一次。
+            # 与非流式路径一致：督促重试若给出工具调用，会落入下方 tool_calls 分支正常执行。
+            tool_nudged = True
+            llm_messages.append({"role": "system", "content": _TOOL_NUDGE_MESSAGE})
+            try:
+                response = client.chat(messages=llm_messages, tools=tool_schemas())
+            except AgentLLMError:
+                logger.exception("Agent LLM 调用失败(流式·督促重试): session_id=%s", agent_session_id)
+                failure_text = _llm_failure_text(db, agent_session.id)
+                _persist_message(db, agent_session, role="assistant", content=failure_text)
+                db.expire_all()
+                yield {"event": "error", "data": {"message": failure_text}}
+                yield from _finish()
+                return
         if response.tool_calls:
             _persist_message(
                 db,
@@ -424,20 +439,6 @@ def run_agent_turn_events(
                     pending_generation_tasks.append({"image_session_id": result.get("image_session_id"), **task})
             continue
 
-        if not tool_nudged and not used_tools:
-            # 首轮只回文字未调工具：注入督促后重试一次（工具优先铁律）
-            tool_nudged = True
-            llm_messages.append({"role": "system", "content": _TOOL_NUDGE_MESSAGE})
-            try:
-                response = client.chat(messages=llm_messages, tools=tool_schemas())
-            except AgentLLMError:
-                logger.exception("Agent LLM 调用失败(流式·督促重试): session_id=%s", agent_session_id)
-                failure_text = _llm_failure_text(db, agent_session.id)
-                _persist_message(db, agent_session, role="assistant", content=failure_text)
-                db.expire_all()
-                yield {"event": "error", "data": {"message": failure_text}}
-                yield from _finish()
-                return
         assistant_message = _persist_message(
             db,
             agent_session,

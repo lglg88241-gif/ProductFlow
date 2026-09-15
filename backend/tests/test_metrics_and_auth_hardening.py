@@ -162,8 +162,59 @@ def test_login_rate_limit_returns_429_after_repeated_failures(configured_env: Pa
         # 达到限速后即使密钥正确也被拒（窗口锁定）
         assert client.post("/api/auth/session", json={"admin_key": "super-secret-admin-key"}).status_code == 429
     finally:
-        with auth_module._login_failure_lock:
-            auth_module._login_failures.clear()
+        auth_module.login_rate_limiter.reset_all()
+
+
+def test_login_rate_limit_isolates_forwarded_clients(configured_env: Path) -> None:
+    """X-Forwarded-For 参与分桶：一个 IP 打满 5 次后，另一个 IP 仍可正常登录（回归：全局桶）。"""
+    from productflow_backend.presentation.api import create_app
+    from productflow_backend.presentation.rate_limit import login_rate_limiter
+
+    client = TestClient(create_app())
+    try:
+        for _ in range(5):
+            assert (
+                client.post(
+                    "/api/auth/session",
+                    json={"admin_key": "nope"},
+                    headers={"X-Forwarded-For": "10.1.1.7"},
+                ).status_code
+                == 401
+            )
+        limited = client.post(
+            "/api/auth/session", json={"admin_key": "nope"}, headers={"X-Forwarded-For": "10.1.1.7"}
+        )
+        assert limited.status_code == 429
+        # 不同转发 IP 的桶互不影响
+        assert (
+            client.post(
+                "/api/auth/session",
+                json={"admin_key": "super-secret-admin-key"},
+                headers={"X-Forwarded-For": "10.1.1.9"},
+            ).status_code
+            == 200
+        )
+    finally:
+        login_rate_limiter.reset_all()
+
+
+def test_settings_unlock_rate_limited_after_repeated_failures(configured_env: Path) -> None:
+    """设置解锁令牌与登录同策略：15 分钟窗口内第 6 次失败起 429，成功清零。"""
+    from productflow_backend.presentation.api import create_app
+    from productflow_backend.presentation.rate_limit import settings_unlock_rate_limiter
+
+    client = TestClient(create_app())
+    client.post("/api/auth/session", json={"admin_key": "super-secret-admin-key"})
+    try:
+        for _ in range(5):
+            assert (
+                client.post("/api/settings/unlock", json={"token": "definitely-wrong"}).status_code == 401
+            )
+        assert client.post("/api/settings/unlock", json={"token": "definitely-wrong"}).status_code == 429
+        # 窗口锁定下即使令牌正确也被拒
+        assert client.post("/api/settings/unlock", json={"token": "super-secret-settings-token"}).status_code == 429
+    finally:
+        settings_unlock_rate_limiter.reset_all()
 
 
 def test_login_success_resets_failure_counter(configured_env: Path) -> None:
@@ -182,8 +233,7 @@ def test_login_success_resets_failure_counter(configured_env: Path) -> None:
             assert client.post("/api/auth/session", json={"admin_key": "wrong-again"}).status_code == 401
         assert client.post("/api/auth/session", json={"admin_key": "wrong-again"}).status_code == 429
     finally:
-        with auth_module._login_failure_lock:
-            auth_module._login_failures.clear()
+        auth_module.login_rate_limiter.reset_all()
 
 
 def test_production_startup_fails_fast_when_admin_gate_disabled(

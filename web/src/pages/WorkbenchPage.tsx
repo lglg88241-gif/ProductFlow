@@ -7,9 +7,9 @@ import { MultiCandidateCard, shouldRenderMultiCandidates } from "../components/M
 import { PosterRerenderCard } from "../components/PosterRerenderCard";
 import { TopNav } from "../components/TopNav";
 import { api, ApiError } from "../lib/api";
+import { shouldSubmitOnEnter } from "../lib/composerKeys";
 import type {
   AgentAssetEntry,
-  AgentCopyReport,
   AgentDesignRecommendation,
   AgentMessage,
   AgentSessionDetail,
@@ -152,35 +152,6 @@ function RecommendationCards({
   );
 }
 
-function CopyReportDetailCard({ event }: { event: AgentToolEvent }) {
-  const { t } = useI18n();
-  const report: AgentCopyReport | undefined = event.result.report;
-  if (!report) return null;
-  return (
-    <div className="mt-2 space-y-2 rounded-xl border border-slate-200 bg-white p-3 text-sm">
-      {report.headline ? <p className="text-base font-semibold text-slate-900">{report.headline}</p> : null}
-      {report.moments_caption ? (
-        <p className="whitespace-pre-wrap text-slate-800">{report.moments_caption}</p>
-      ) : null}
-      {report.selling_points && report.selling_points.length > 0 ? (
-        <ul className="list-inside list-disc text-xs text-slate-600">
-          {report.selling_points.map((point, index) => (
-            <li key={index}>{point}</li>
-          ))}
-        </ul>
-      ) : null}
-      {report.hashtags && report.hashtags.length > 0 ? (
-        <p className="text-xs text-slate-500">{report.hashtags.map((tag) => `#${tag}`).join(" ")}</p>
-      ) : null}
-      {report.publishing_tips ? (
-        <p className="rounded-lg bg-amber-50 p-2 text-xs text-amber-700">
-          {t("workbench.report.tips")}: {report.publishing_tips}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 function GridExportCard({ event }: { event: AgentToolEvent }) {
   const { t } = useI18n();
   const url = event.result.download_url;
@@ -227,14 +198,7 @@ function ToolEventCard({
   if (event.tool === "analyze_template") return <TemplateProfile event={event} />;
   if (event.tool === "export_moments_grid") return <GridExportCard event={event} />;
   if (event.tool === "recommend_designs") return <RecommendationCards event={event} onPick={onPick} />;
-  if (event.tool === "write_copy_report") {
-    return (
-      <>
-        <CopyReportCard event={event} />
-        <CopyReportDetailCard event={event} />
-      </>
-    );
-  }
+  if (event.tool === "write_copy_report") return <CopyReportCard event={event} />;
   if (event.tool === "rerender_poster_copy") return <PosterRerenderCard event={event} />;
   return null;
 }
@@ -552,7 +516,14 @@ export function WorkbenchPage() {
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
+                  // 中文/日文输入法组词回车不发送（主场景是中文）
+                  if (
+                    shouldSubmitOnEnter({
+                      key: event.key,
+                      shiftKey: event.shiftKey,
+                      isComposing: event.nativeEvent.isComposing,
+                    })
+                  ) {
                     event.preventDefault();
                     submit();
                   }

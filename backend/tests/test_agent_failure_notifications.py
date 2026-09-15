@@ -337,3 +337,41 @@ def test_agent_system_prompt_contains_experience_rules() -> None:
         "收尾语雷同",  # 规则 7：收尾语最多说一次
     ):
         assert phrase in AGENT_SYSTEM_PROMPT, f"系统提示词缺少关键规则短语: {phrase}"
+
+
+def test_enqueue_failed_marks_failed_and_notifies_linked_agent_session(
+    configured_env: Path, db_session
+) -> None:
+    """入队即失败（API 侧投递不出去）也要落终态并回灌 agent 会话。"""
+    from productflow_backend.application.designer_agent.loop import create_agent_session
+    from productflow_backend.application.image_sessions import (
+        create_image_session,
+        create_image_session_generation_task,
+        mark_image_session_generation_task_enqueue_failed,
+    )
+    from productflow_backend.domain.enums import JobStatus
+
+    image_session = create_image_session(db_session, title="入队失败")
+    agent_session = create_agent_session(db_session, title="入队失败会话")
+    _link_agent_to_image_session(db_session, agent_session.id, image_session.id)
+    result = create_image_session_generation_task(
+        db_session,
+        image_session_id=image_session.id,
+        prompt="这批海报进不了队列",
+        size="1024x1024",
+    )
+
+    mark_image_session_generation_task_enqueue_failed(
+        db_session, task_id=result.task.id, reason="Redis connection refused to 127.0.0.1:16379"
+    )
+
+    db_session.expire_all()
+    task = db_session.get(ImageSessionGenerationTask, result.task.id)
+    assert task is not None
+    assert task.status == JobStatus.FAILED
+    assert task.progress_phase == "enqueue_failed"
+
+    contents = _agent_assistant_messages(db_session, agent_session.id)
+    assert len(contents) == 1, "入队失败回灌一次人话通知"
+    assert "重试" in contents[0]
+    assert "Redis" not in contents[0] and "16379" not in contents[0]

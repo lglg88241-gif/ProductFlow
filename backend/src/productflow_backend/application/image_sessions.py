@@ -1225,6 +1225,10 @@ def mark_image_session_generation_task_enqueue_failed(session: Session, *, task_
     task.is_retryable = True
     _touch_image_session_if_present(session, task.session_id, now=now)
     session.commit()
+    # 入队即死也要让 agent 会话知情（此前 agent 已对用户说"正在生成"）
+    _notify_agent_session_failure_safely(
+        session, image_session_id=task.session_id, reason=reason, task_kind="image_generation"
+    )
 
 
 def _touch_image_session_if_present(
