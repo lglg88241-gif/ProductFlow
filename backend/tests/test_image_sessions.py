@@ -2505,3 +2505,69 @@ def test_image_session_result_can_write_back_to_product(configured_env: Path) ->
     ]
     assert len(original_assets) == 1
     assert len(all_reference_assets) >= 2
+
+
+def test_image_session_list_endpoint_is_paginated_and_shape_stable(configured_env: Path) -> None:
+    """列表端点支持 limit/offset 分页并返回 total；items 摘要形状保持不变。"""
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+
+    for index in range(3):
+        created = client.post("/api/image-sessions", json={"title": f"列表会话 {index}"})
+        assert created.status_code == 201
+
+    listed = client.get("/api/image-sessions")
+    assert listed.status_code == 200
+    payload = listed.json()
+    assert payload["total"] == 3
+    assert len(payload["items"]) == 3
+    # updated_at 降序：最后创建的会话排最前
+    assert [item["title"] for item in payload["items"]] == ["列表会话 2", "列表会话 1", "列表会话 0"]
+    assert set(payload["items"][0]) == {
+        "id",
+        "title",
+        "rounds_count",
+        "latest_generated_asset",
+        "created_at",
+        "updated_at",
+    }
+
+    paged = client.get("/api/image-sessions", params={"limit": 2, "offset": 1})
+    assert paged.status_code == 200
+    assert [item["title"] for item in paged.json()["items"]] == ["列表会话 1", "列表会话 0"]
+    assert paged.json()["total"] == 3
+
+    invalid = client.get("/api/image-sessions", params={"limit": 101})
+    assert invalid.status_code == 422
+
+
+def test_image_session_list_summary_reflects_rounds_after_generation(configured_env: Path) -> None:
+    """瘦身 eager load 后，摘要仍正确给出 rounds_count 与最新候选缩略图。"""
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+
+    created = client.post("/api/image-sessions", json={"title": "瘦身摘要"})
+    assert created.status_code == 201
+    session_id = created.json()["id"]
+    generated = client.post(
+        f"/api/image-sessions/{session_id}/generate",
+        json={"prompt": "奶油质感护手霜广告图，白底", "size": "1024x1024", "generation_count": 2},
+    )
+    assert generated.status_code == 202
+
+    listed = client.get("/api/image-sessions")
+    assert listed.status_code == 200
+    summary = next(item for item in listed.json()["items"] if item["id"] == session_id)
+    assert summary["rounds_count"] == 2
+    latest_asset = summary["latest_generated_asset"]
+    assert latest_asset is not None
+    assert latest_asset["kind"] == "generated_image"
+    assert latest_asset["thumbnail_url"].endswith("variant=thumbnail")
+    thumbnail = client.get(latest_asset["thumbnail_url"])
+    assert thumbnail.status_code == 200

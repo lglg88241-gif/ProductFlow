@@ -9,6 +9,7 @@ import {
   collectPendingImageSessionIds,
   createCandidatePoller,
   expectedCandidatesForSession,
+  hasFailedGenerationTask,
   mergeCandidatePollUpdate,
   type CandidatePollUpdate,
 } from "./candidatePolling";
@@ -29,7 +30,7 @@ function toolEvent(tool: string, result: AgentToolEvent["result"]): AgentToolEve
 
 /** 只构造被测函数读取的字段，其余字段与映射无关。 */
 function detailWith(
-  tasks: Array<{ created_at: string; result_generation_group_id: string | null }>,
+  tasks: Array<{ created_at: string; result_generation_group_id: string | null; status?: string }>,
   rounds: Array<{
     generation_group_id: string | null;
     candidate_index: number;
@@ -42,6 +43,7 @@ function detailWith(
       id: `task-${index}`,
       created_at: task.created_at,
       result_generation_group_id: task.result_generation_group_id,
+      ...(task.status !== undefined ? { status: task.status } : {}),
     })),
     rounds: rounds.map((round) => ({
       id: `round-${round.generation_group_id}-${round.candidate_index}`,
@@ -182,7 +184,7 @@ describe("candidatesFromImageSessionDetail", () => {
 describe("mergeCandidatePollUpdate", () => {
   it("合并轮询更新并保留其他会话状态", () => {
     let state = mergeCandidatePollUpdate({}, "s1", { elapsedSeconds: 3 });
-    expect(state.s1).toEqual({ candidates: [], elapsedSeconds: 3, expired: false });
+    expect(state.s1).toEqual({ candidates: [], elapsedSeconds: 3, expired: false, failed: false });
     state = mergeCandidatePollUpdate(state, "s1", { elapsedSeconds: 6 });
     expect(state.s1.elapsedSeconds).toBe(6);
     const candidates = [{ asset_id: "a", url: "u", label: "候选 1" }];
@@ -192,6 +194,13 @@ describe("mergeCandidatePollUpdate", () => {
     state = mergeCandidatePollUpdate(state, "s2", { expired: true });
     expect(state.s1.expired).toBe(false);
     expect(state.s2).toEqual({ ...EMPTY_CANDIDATE_POLL_STATE, expired: true });
+  });
+
+  it("失败标记为粘性：一旦失败保持失败态", () => {
+    let state = mergeCandidatePollUpdate({}, "s1", { failed: true });
+    expect(state.s1).toEqual({ ...EMPTY_CANDIDATE_POLL_STATE, failed: true });
+    state = mergeCandidatePollUpdate(state, "s1", { elapsedSeconds: 3 });
+    expect(state.s1.failed).toBe(true);
   });
 });
 
@@ -326,6 +335,46 @@ describe("候选轮询器", () => {
     expect(updates).toEqual([{ elapsedSeconds: 3 }, { expired: true }]);
     await vi.advanceTimersByTimeAsync(CANDIDATE_POLL_INTERVAL_MS * 5);
     expect(calls).toBe(2);
+  });
+
+  it("最新任务状态为 failed 时立即回调 failed 并停止轮询", async () => {
+    const updates: CandidatePollUpdate[] = [];
+    let calls = 0;
+    const poller = createCandidatePoller({
+      imageSessionId: "s1",
+      fetchDetail: () => {
+        calls += 1;
+        return Promise.resolve(
+          detailWith([{ created_at: "2026-01-01T00:00:00Z", result_generation_group_id: null, status: "failed" }], []),
+        );
+      },
+      formatLabel,
+      onUpdate: (update) => updates.push(update),
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hasFailedGenerationTask).toBeDefined(); // 失败映射辅助函数存在
+    expect(updates).toEqual([{ failed: true }]);
+    await vi.advanceTimersByTimeAsync(CANDIDATE_POLL_INTERVAL_MS * 5);
+    expect(calls).toBe(1); // 失败后不再轮询
+  });
+
+  it("任务运行中不误报失败，无候选超时后仍走超时兜底", async () => {
+    const updates: CandidatePollUpdate[] = [];
+    const poller = createCandidatePoller({
+      imageSessionId: "s1",
+      fetchDetail: () =>
+        Promise.resolve(
+          detailWith([{ created_at: "2026-01-01T00:00:00Z", result_generation_group_id: null, status: "running" }], []),
+        ),
+      formatLabel,
+      maxAttempts: 2,
+      onUpdate: (update) => updates.push(update),
+    });
+    poller.start();
+    await vi.advanceTimersByTimeAsync(CANDIDATE_POLL_INTERVAL_MS * 3);
+    expect(updates).toEqual([{ elapsedSeconds: 3 }, { expired: true }]);
+    expect(updates.some((update) => update.failed === true)).toBe(false);
   });
 
   it("dispose 后不再轮询也不再回调（卸载清理）", async () => {

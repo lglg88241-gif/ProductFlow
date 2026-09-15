@@ -6,7 +6,7 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
-from sqlalchemy import select
+from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from productflow_backend.application.designer_agent.llm import AgentLLMClient, AgentLLMError
@@ -154,13 +154,46 @@ def get_asset_entry(db: Session, asset_id: str) -> AssetLibraryEntry:
     return entry
 
 
+def _asset_search_prefilter(tokens: list[str]):
+    """检索 SQL 预筛条件：任一词命中 title / tags / 模板档案 JSON 的行进入内存精排。
+
+    宽口径超集（宁多勿漏）：JSON 列的库内文本由 json.dumps（ensure_ascii=True）序列化，
+    非 ASCII 词以 \\uXXXX 形式存储，因此同时匹配原始词与 JSON 转义形式，
+    兼容自定义序列化器（库内保留原文本）的情况。
+    """
+    token_conditions = []
+    for token in tokens:
+        escaped = json.dumps(token, ensure_ascii=True)[1:-1]
+        conditions = [AssetLibraryEntry.title.contains(token, autoescape=True)]
+        for column in (AssetLibraryEntry.vision_tags_json, AssetLibraryEntry.template_profile_json):
+            column_text = cast(column, String)
+            conditions.append(column_text.contains(token, autoescape=True))
+            if escaped != token:
+                conditions.append(column_text.contains(escaped, autoescape=True))
+        token_conditions.append(or_(*conditions))
+    return or_(*token_conditions)
+
+
 def search_asset_entries(
     db: Session, query: str, *, kind: str | None = None, limit: int = 5
 ) -> list[AssetLibraryEntry]:
-    """轻量语义检索：对标题/标签/模板档案做词项匹配打分（M3 再升级向量检索）。"""
+    """轻量语义检索：对标题/标签/模板档案做词项匹配打分（M3 再升级向量检索）。
+
+    先用 SQL 预筛掉一个词都不命中的行，再在内存对候选集用原有打分逻辑精排；
+    预筛是宽口径超集，打分函数与排序语义保持不变。
+    """
     tokens = [token for token in query.replace("，", " ").replace(",", " ").split() if token]
+    if not tokens:
+        return []
+    statement = (
+        select(AssetLibraryEntry)
+        .where(_asset_search_prefilter(tokens))
+        .order_by(AssetLibraryEntry.created_at.desc(), AssetLibraryEntry.id)
+    )
+    if kind:
+        statement = statement.where(AssetLibraryEntry.kind == kind)
     scored: list[tuple[int, AssetLibraryEntry]] = []
-    for entry in list_asset_entries(db, kind=kind):
+    for entry in list(db.scalars(statement).all()):
         profile_text = json.dumps(entry.template_profile_json or {}, ensure_ascii=False)
         haystack = " ".join([entry.title, *entry.vision_tags_json, profile_text])
         score = sum(2 if token in entry.title else 1 for token in tokens if token in haystack)

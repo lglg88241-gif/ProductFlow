@@ -11,7 +11,7 @@ from typing import Any, Literal, cast
 from dramatiq.middleware.time_limit import TimeLimitExceeded
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, load_only, selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from productflow_backend.application.admission import (
@@ -21,6 +21,7 @@ from productflow_backend.application.admission import (
     get_generation_task_queue_metadata,
     get_queued_generation_positions,
 )
+from productflow_backend.application.agent_notifications import notify_agent_session_of_failure
 from productflow_backend.application.image_generation_core import (
     normalize_image_generation_tool_options,
     provider_output_with_actual_image_size,
@@ -73,6 +74,8 @@ GENERIC_IMAGE_GENERATION_FAILURE = "图片生成失败，请稍后重试"
 PARTIAL_IMAGE_GENERATION_FAILURE = "已生成 {completed}/{requested} 张候选，后续生成失败，请重新发起生成补齐。"
 PARTIAL_IMAGE_GENERATION_TIMEOUT = "已生成 {completed}/{requested} 张候选，但任务超时，剩余候选未完成。"
 IMAGE_SESSION_CANCELLED_REASON = "已取消"
+DEFAULT_IMAGE_SESSION_LIST_LIMIT = 50
+MAX_IMAGE_SESSION_LIST_LIMIT = 100
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,39 @@ def _image_session_query():
             selectinload(ImageSession.rounds).selectinload(ImageSessionRound.generated_asset),
             selectinload(ImageSession.generation_tasks),
             selectinload(ImageSession.messages),
+        )
+        .order_by(desc(ImageSession.updated_at))
+    )
+
+
+def _image_session_list_query():
+    """列表页专用瘦身查询。
+
+    前端会话列表只消费 id/title/rounds_count/latest_generated_asset 缩略图/updated_at，
+    因此只加载摘要序列化所需的最小列集，跳过轮次正文、provider JSON、
+    全部资产/任务/消息等重负载（详情端点仍走 _image_session_query 全量加载）。
+    """
+    return (
+        select(ImageSession)
+        .options(
+            load_only(
+                ImageSession.id,
+                ImageSession.title,
+                ImageSession.created_at,
+                ImageSession.updated_at,
+            ),
+            selectinload(ImageSession.rounds).options(
+                load_only(ImageSessionRound.created_at, ImageSessionRound.generated_asset_id),
+                selectinload(ImageSessionRound.generated_asset).options(
+                    load_only(
+                        ImageSessionAsset.id,
+                        ImageSessionAsset.kind,
+                        ImageSessionAsset.original_filename,
+                        ImageSessionAsset.mime_type,
+                        ImageSessionAsset.created_at,
+                    )
+                ),
+            ),
         )
         .order_by(desc(ImageSession.updated_at))
     )
@@ -493,8 +529,20 @@ def _provider_output_with_actual_size(
     )
 
 
-def list_image_sessions(session: Session) -> list[ImageSession]:
-    return list(session.scalars(_image_session_query()).all())
+def list_image_sessions(
+    session: Session,
+    *,
+    limit: int = DEFAULT_IMAGE_SESSION_LIST_LIMIT,
+    offset: int = 0,
+) -> list[ImageSession]:
+    """分页返回会话摘要（瘦身 eager load）；响应形状与旧全量列表一致。"""
+    query = _image_session_list_query().limit(limit).offset(offset)
+    return list(session.scalars(query).all())
+
+
+def count_image_sessions(session: Session) -> int:
+    """列表 total 计数（配合 limit/offset 分页使用）。"""
+    return int(session.scalar(select(func.count()).select_from(ImageSession)) or 0)
 
 
 def get_image_session_detail(session: Session, image_session_id: str) -> ImageSession:
@@ -1406,6 +1454,20 @@ def _mark_image_generation_task_failed(session: Session, *, task_id: str, reason
     )
 
 
+def _notify_agent_session_failure_safely(
+    session: Session,
+    *,
+    image_session_id: str,
+    reason: str,
+    task_kind: str,
+) -> None:
+    """终态失败回灌 agent 会话；找不到关联会话静默跳过，通知自身失败不影响落库主流程。"""
+    try:
+        notify_agent_session_of_failure(session, image_session_id, reason, task_kind)
+    except Exception:  # noqa: BLE001
+        logger.exception("生图失败回灌 agent 会话通知失败: image_session_id=%s", image_session_id)
+
+
 def _handle_image_generation_task_failure(
     session: Session,
     *,
@@ -1429,6 +1491,12 @@ def _handle_image_generation_task_failure(
             failure_reason=reason,
             result_generation_group_id=result_generation_group_id,
             is_retryable=False,
+        )
+        _notify_agent_session_failure_safely(
+            session,
+            image_session_id=task.session_id,
+            reason=reason,
+            task_kind="image_generation",
         )
         return
     if task.attempts < IMAGE_SESSION_GENERATION_MAX_ATTEMPTS:
@@ -1460,6 +1528,12 @@ def _handle_image_generation_task_failure(
                     result_generation_group_id=result_generation_group_id,
                     is_retryable=True,
                 )
+                _notify_agent_session_failure_safely(
+                    session,
+                    image_session_id=task.session_id,
+                    reason=QUEUE_UNAVAILABLE_DETAIL,
+                    task_kind="image_generation",
+                )
         return
 
     _finish_image_generation_task(
@@ -1469,6 +1543,12 @@ def _handle_image_generation_task_failure(
         failure_reason=reason,
         result_generation_group_id=result_generation_group_id,
         is_retryable=True,
+    )
+    _notify_agent_session_failure_safely(
+        session,
+        image_session_id=task.session_id,
+        reason=reason,
+        task_kind="image_generation",
     )
 
 

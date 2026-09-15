@@ -4,14 +4,38 @@ import {
   DEFAULT_LOCALE,
   LOCALES,
   LOCALE_LABEL_KEYS,
+  ensureLocale,
+  getDictionaryVersion,
+  getLoadedDictionary,
   interpolate,
+  isLocaleLoaded,
   resolveLocale,
+  subscribeToDictionaries,
   translate,
-  translations,
 } from "./i18n";
 import { resolveTheme, resolveThemePreference } from "./theme";
 
 describe("i18n helpers", () => {
+  it("falls back to zh-CN copy while a locale dictionary is not loaded, then refreshes after load", async () => {
+    // 模块注册表此时只有 zh-CN 同步加载（本文件尚未触发任何 ensureLocale）
+    expect(isLocaleLoaded("ja-JP")).toBe(false);
+    expect(getLoadedDictionary("ja-JP")).toBeUndefined();
+    expect(translate("ja-JP", "nav.language")).toBe(translate("zh-CN", "nav.language"));
+
+    const versions: number[] = [];
+    const unsubscribe = subscribeToDictionaries(() => versions.push(getDictionaryVersion()));
+    try {
+      await ensureLocale("ja-JP");
+    } finally {
+      unsubscribe();
+    }
+
+    expect(isLocaleLoaded("ja-JP")).toBe(true);
+    expect(translate("ja-JP", "nav.language")).toBe("言語");
+    expect(versions.length).toBeGreaterThan(0); // 字典注册后通知订阅者（触发全局重渲染）
+    await expect(ensureLocale("ja-JP")).resolves.toBeUndefined(); // 重复加载命中内存缓存
+  });
+
   it("resolves supported locales and falls back to Chinese", () => {
     expect(resolveLocale("en-US")).toBe("en-US");
     expect(resolveLocale("zh-CN")).toBe("zh-CN");
@@ -20,12 +44,13 @@ describe("i18n helpers", () => {
     expect(resolveLocale(null)).toBe(DEFAULT_LOCALE);
   });
 
-  it("keeps locale selector metadata aligned with supported locales", () => {
-    const defaultKeys = Object.keys(translations[DEFAULT_LOCALE]).sort();
+  it("keeps locale selector metadata aligned with supported locales", async () => {
+    await Promise.all(LOCALES.map((locale) => ensureLocale(locale)));
+    const defaultKeys = Object.keys(getLoadedDictionary(DEFAULT_LOCALE) ?? {}).sort();
 
     expect(Object.keys(LOCALE_LABEL_KEYS).sort()).toEqual([...LOCALES].sort());
     for (const locale of LOCALES) {
-      expect(Object.keys(translations[locale]).sort()).toEqual(defaultKeys);
+      expect(Object.keys(getLoadedDictionary(locale) ?? {}).sort()).toEqual(defaultKeys);
     }
     expect(translate("vi-VN", "locale.viVN")).toBe("Tiếng Việt");
     expect(translate("vi-VN", "nav.language")).toBe("Ngôn ngữ");

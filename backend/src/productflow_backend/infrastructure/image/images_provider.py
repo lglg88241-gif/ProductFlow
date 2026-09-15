@@ -33,6 +33,7 @@ from productflow_backend.infrastructure.image.responses_provider import (
     image_provider_http_timeout,
     poster_has_reference_input,
 )
+from productflow_backend.infrastructure.openai_client_cache import KeyedClientCache
 from productflow_backend.infrastructure.prompts import render_prompt_template
 from productflow_backend.infrastructure.provider_config import (
     ResolvedImageProviderConfig,
@@ -41,6 +42,9 @@ from productflow_backend.infrastructure.provider_config import (
 from productflow_backend.infrastructure.remote_fetch import RemoteFetchError, fetch_remote_image
 
 logger = logging.getLogger(__name__)
+
+# 按 (api_key, base_url, 超时预算) 复用 OpenAI 客户端；超时预算变化编入缓存键，语义不回退
+_OPENAI_CLIENTS = KeyedClientCache()
 
 PROVIDER_REQUEST_FAILURE_MESSAGE = "图片供应商请求失败，请检查供应商配置后重试"
 PROVIDER_MISSING_OUTPUT_MESSAGE = "图片供应商没有返回图片结果，请稍后重试"
@@ -165,14 +169,16 @@ class OpenAIImagesClient:
     def _client(self) -> OpenAI:
         if not self.api_key:
             raise RuntimeError("图片供应商档案缺少 API Key")
+        # 生图链路统一超时预算：默认 SDK 600s/调用太宽， worker time_limit 兜底前必须有明确 deadline
+        timeout = image_provider_http_timeout()
+        cache_key = (self.api_key, self.base_url or None, timeout.connect, timeout.read, timeout.write, timeout.pool)
         kwargs: dict[str, Any] = {
             "api_key": self.api_key,
-            # 生图链路统一超时预算：默认 SDK 600s/调用太宽， worker time_limit 兜底前必须有明确 deadline
-            "timeout": image_provider_http_timeout(),
+            "timeout": timeout,
         }
         if self.base_url:
             kwargs["base_url"] = self.base_url
-        return OpenAI(**kwargs)
+        return _OPENAI_CLIENTS.get_or_create(cache_key, lambda: OpenAI(**kwargs))
 
     def _parse_response(
         self,

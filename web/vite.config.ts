@@ -31,5 +31,21 @@ export default defineConfig(({ mode }) => {
       host: "0.0.0.0",
       allowedHosts,
     },
+    build: {
+      rollupOptions: {
+        output: {
+          // 按生态拆分第三方依赖，稳定缓存：react 全家桶一组、@tanstack 一组、lucide 图标一组
+          manualChunks(id: string) {
+            if (id.indexOf("node_modules") === -1) return undefined;
+            if (id.indexOf("@tanstack") !== -1) return "tanstack";
+            if (id.indexOf("lucide-react") !== -1) return "lucide";
+            if (/[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom|scheduler)[\\/]/.test(id)) {
+              return "react";
+            }
+            return undefined;
+          },
+        },
+      },
+    },
   };
 });

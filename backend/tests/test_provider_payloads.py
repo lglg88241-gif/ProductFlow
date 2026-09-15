@@ -1845,6 +1845,8 @@ def test_openai_images_client_reports_missing_output_and_sanitizes_failures(
         OpenAIImagesClient().generate(prompt="没有图", size="1024x1024")
     assert str(missing_error.value) == "图片供应商没有返回图片结果，请稍后重试"
 
+    # OpenAI 客户端按连接参数复用：切换假供应商前需清空缓存，让 FailingOpenAI 重新构造
+    images_provider._OPENAI_CLIENTS.clear()
     monkeypatch.setattr(images_provider, "OpenAI", FailingOpenAI)
     with pytest.raises(RuntimeError) as failure_error:
         OpenAIImagesClient().generate(prompt="失败", size="1024x1024")

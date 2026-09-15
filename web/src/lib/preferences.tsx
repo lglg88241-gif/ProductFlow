@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 
 import {
   DEFAULT_LOCALE,
@@ -6,7 +6,10 @@ import {
   type Locale,
   type TranslationKey,
   type TranslationParams,
+  ensureLocale,
+  getDictionaryVersion,
   resolveLocale,
+  subscribeToDictionaries,
   translate,
 } from "./i18n";
 import {
@@ -48,10 +51,17 @@ function getSystemPrefersDark(): boolean {
 
 export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => resolveLocale(readStorage(LOCALE_STORAGE_KEY)));
+  // 字典版本号：懒加载语言（en/ja/vi）注册完成后自增，触发全局重渲染补齐翻译
+  const dictionaryVersion = useSyncExternalStore(subscribeToDictionaries, getDictionaryVersion, getDictionaryVersion);
   const [themePreference, setThemePreferenceState] = useState<ThemePreference>(() =>
     resolveThemePreference(readStorage(THEME_STORAGE_KEY)),
   );
   const [systemPrefersDark, setSystemPrefersDark] = useState(getSystemPrefersDark);
+
+  useEffect(() => {
+    // 切换语言即按需加载对应字典；失败时保持 zh-CN 回落文案，不中断应用
+    void ensureLocale(locale).catch(() => undefined);
+  }, [locale]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.matchMedia) {
@@ -89,7 +99,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
         resolvedTheme,
       };
     },
-    [locale, resolvedTheme, themePreference],
+    [locale, resolvedTheme, themePreference, dictionaryVersion],
   );
 
   return <PreferencesContext.Provider value={value}>{children}</PreferencesContext.Provider>;

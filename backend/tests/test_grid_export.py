@@ -9,6 +9,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from helpers import _login
 from PIL import Image
@@ -222,3 +223,48 @@ def test_product_pipeline_requires_library_asset(configured_env: Path, install_s
         assert "商品主图" in tool_result["message"]
     finally:
         db.close()
+
+
+def test_grid_export_endpoint_runs_slicing_via_threadpool(
+    configured_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """async 端点把 PIL 切图 offload 到线程池执行（事件循环不被长 CPU 阻塞）。"""
+    import productflow_backend.presentation.routes.agent as agent_routes
+    from productflow_backend.application import grid_export
+    from productflow_backend.presentation.api import create_app
+
+    real_run_in_threadpool = agent_routes.run_in_threadpool
+    offloaded: list[str] = []
+    sliced: list[bool] = []
+
+    async def spy_run_in_threadpool(func, *args, **kwargs):
+        offloaded.append(getattr(func, "__name__", str(func)))
+        return await real_run_in_threadpool(func, *args, **kwargs)
+
+    real_slice = grid_export.slice_into_grid
+
+    def spy_slice_into_grid(image_bytes, *, grid, fmt="png"):
+        sliced.append(True)
+        return real_slice(image_bytes, grid=grid, fmt=fmt)
+
+    monkeypatch.setattr(agent_routes, "run_in_threadpool", spy_run_in_threadpool)
+    monkeypatch.setattr(grid_export, "slice_into_grid", spy_slice_into_grid)
+
+    app = create_app()
+    client = TestClient(app)
+    _login(client)
+
+    uploaded = client.post(
+        "/api/agent/assets",
+        files={"file": ("海报.png", _png_bytes(600, 600), "image/png")},
+        data={"kind": "output"},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    asset_id = uploaded.json()["id"]
+
+    exported = client.get(f"/api/agent/assets/{asset_id}/grid-export", params={"grid": "2x2"})
+    assert exported.status_code == 200
+    assert exported.headers["x-grid-tiles"] == "4"
+    assert sliced == [True]
+    # spy 版 slice_into_grid 只会经路由内的 run_in_threadpool 调用，出现在 offloaded 即证明切图在工作线程执行
+    assert offloaded.count("spy_slice_into_grid") == 1, "切图调用必须经 run_in_threadpool 执行"

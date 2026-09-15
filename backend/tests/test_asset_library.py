@@ -287,3 +287,30 @@ def test_generate_image_with_unknown_template_reports_error(configured_env: Path
         assert "素材库" in tool_result["message"]
     finally:
         db.close()
+
+
+def test_search_asset_entries_prefilter_keeps_tag_only_matches(configured_env: Path) -> None:
+    """SQL 预筛是宽口径超集：tag 命中但标题不含词的素材不能漏。"""
+    from productflow_backend.application.asset_library import (
+        bootstrap_builtin_assets,
+        search_asset_entries,
+    )
+    from productflow_backend.infrastructure.db.session import get_session_factory
+
+    bootstrap_builtin_assets()
+    db = get_session_factory()()
+    try:
+        # “促销”只出现在内置模板的标签与模板档案里，标题不含：预筛不能漏掉
+        results = search_asset_entries(db, "促销", kind="template")
+        assert results, "tag 命中但 name 不命中的素材不应被 SQL 预筛漏掉"
+        assert "黑粉撞色大字报风" in [entry.title for entry in results]
+
+        # 打分语义保持：标题命中的素材排在纯标签命中之前
+        ranked = search_asset_entries(db, "大字报 促销")
+        assert ranked
+        assert ranked[0].title == "黑粉撞色大字报风"
+
+        # 无命中的词返回空列表
+        assert search_asset_entries(db, "不存在的词xyz") == []
+    finally:
+        db.close()

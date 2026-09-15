@@ -120,6 +120,8 @@ class ImageSessionStatusResponse(BaseModel):
 
 class ImageSessionListResponse(BaseModel):
     items: list[ImageSessionSummaryResponse]
+    # 可选 total：配合 limit/offset 分页使用；前端未读取该字段也不受影响
+    total: int | None = None
 
 
 class ImageSessionMessageResponse(BaseModel):

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_IMAGE_SIZE_OPTIONS,
@@ -9,6 +9,12 @@ import {
   parseImageSizeValue,
   resolveImageSize,
 } from "./imageSizes";
+import { ensureLocale } from "./i18n";
+
+beforeAll(async () => {
+  // en-US 字典为懒加载模块，先显式加载再断言英文文案
+  await ensureLocale("en-US");
+});
 
 describe("image size helpers", () => {
   it("provides built-in ratio/tier presets without runtime config", () => {

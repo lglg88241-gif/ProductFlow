@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import type { CanvasTemplateSummary } from "./types";
 import {
@@ -6,6 +6,12 @@ import {
   localizeBuiltInTemplateNodeTitle,
   localizeCanvasTemplateSummary,
 } from "./canvasTemplateLocalization";
+import { ensureLocale } from "./i18n";
+
+beforeAll(async () => {
+  // en/ja/vi 字典为懒加载模块，先显式加载再断言各语言文案
+  await Promise.all((["en-US", "ja-JP", "vi-VN"] as const).map((locale) => ensureLocale(locale)));
+});
 
 const builtInTemplate: CanvasTemplateSummary = {
   key: "ecommerce-main-image-v1",

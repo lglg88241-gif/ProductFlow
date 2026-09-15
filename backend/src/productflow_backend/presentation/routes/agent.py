@@ -9,6 +9,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from productflow_backend.application.asset_library import (
     ASSET_KINDS,
@@ -39,6 +40,11 @@ from productflow_backend.presentation.schemas.agent import (
     AgentTurnRequest,
     AgentTurnResponse,
 )
+
+logger = logging.getLogger(__name__)
+
+# 路由层兜底的 LLM 故障文案：给用户的是人话，原始异常只进日志
+_LLM_FAILURE_USER_MESSAGE = "设计师模型暂时没有响应，请稍等片刻再试一次。"
 
 router = APIRouter(prefix="/api/agent", tags=["designer-agent"], dependencies=[Depends(require_admin)])
 
@@ -226,24 +232,29 @@ def download_agent_asset_endpoint(
 
 
 @router.get("/assets/{asset_id}/grid-export")
-def export_asset_grid_endpoint(
+async def export_asset_grid_endpoint(
     asset_id: str,
     grid: str = "3x3",
     fmt: str = "png",
     session: Session = Depends(get_session),
 ):
-    """把素材切成朋友圈分格切片（zip 下载）。"""
+    """把素材切成朋友圈分格切片（zip 下载）。
+
+    PIL 切图（optimize 压缩）是长 CPU 任务：async 端点显式经 run_in_threadpool
+    offload 到工作线程，事件循环在切片期间保持响应；响应行为与同步版完全一致。
+    """
     from fastapi import Response
 
     from productflow_backend.application.grid_export import slice_into_grid
     from productflow_backend.infrastructure.storage import LocalStorage
 
     entry = get_asset_entry(session, asset_id)
+    storage = LocalStorage()
     try:
-        raw = LocalStorage().resolve(entry.storage_path).read_bytes()
+        raw = await run_in_threadpool(lambda: storage.resolve(entry.storage_path).read_bytes())
     except (OSError, ValueError) as exc:
         raise HTTPException(status_code=404, detail="素材文件不存在") from exc
-    result = slice_into_grid(raw, grid=grid, fmt=fmt)
+    result = await run_in_threadpool(slice_into_grid, raw, grid=grid, fmt=fmt)
     filename = f"asset-{asset_id[:8]}-{result.grid}.zip"
     return Response(
         content=result.archive,
@@ -335,7 +346,8 @@ def send_agent_message_endpoint(
     except BusinessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except AgentLLMError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("设计师模型调用失败（非流式端点兜底）: %s", exc)
+        raise HTTPException(status_code=503, detail=_LLM_FAILURE_USER_MESSAGE) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     session.expire_all()
@@ -379,7 +391,12 @@ def send_agent_message_stream_endpoint(
             for event in events:
                 yield _frame(event["event"], event["data"])
         except (BusinessError, AgentLLMError, ValueError) as exc:
-            yield _frame("error", {"message": str(exc)})
+            if isinstance(exc, AgentLLMError):
+                logger.warning("设计师模型调用失败（流式端点兜底）: %s", exc)
+                user_message = _LLM_FAILURE_USER_MESSAGE
+            else:
+                user_message = str(exc)
+            yield _frame("error", {"message": user_message})
             yield _frame("done", {"session_id": agent_session_id, "stage": "", "image_session_id": None,
                                   "tool_events": [], "pending_generation_tasks": []})
 

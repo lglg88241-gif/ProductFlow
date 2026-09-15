@@ -47,7 +47,7 @@ export function expectedCandidatesForSession(
   return expected;
 }
 
-function latestGenerationTask(detail: ImageSessionDetail): ImageSessionGenerationTask | null {
+function latestGenerationTask(detail: ImageSessionDetail | null): ImageSessionGenerationTask | null {
   const tasks = [...(detail?.generation_tasks ?? [])].sort(
     (a, b) =>
       String(a.created_at ?? "").localeCompare(String(b.created_at ?? "")) ||
@@ -79,23 +79,32 @@ export function candidatesFromImageSessionDetail(
   }));
 }
 
+/** 最新生成任务是否明确失败（status === "failed"）。网络错误与取消不算失败，仍走等待或超时兜底。 */
+export function hasFailedGenerationTask(detail: ImageSessionDetail | null): boolean {
+  return latestGenerationTask(detail)?.status === "failed";
+}
+
 /** 单个 image_session 的轮询展示状态。 */
 export interface CandidatePollState {
   candidates: AgentCandidateImage[];
   elapsedSeconds: number;
   expired: boolean;
+  /** 最新生成任务明确失败（状态可查时），pending 卡切换为失败态。 */
+  failed: boolean;
 }
 
 export type CandidatePollUpdate = {
   candidates?: AgentCandidateImage[];
   elapsedSeconds?: number;
   expired?: boolean;
+  failed?: boolean;
 };
 
 export const EMPTY_CANDIDATE_POLL_STATE: CandidatePollState = {
   candidates: [],
   elapsedSeconds: 0,
   expired: false,
+  failed: false,
 };
 
 /** 把轮询回调合并进按 image_session_id 索引的状态表（纯函数）。 */
@@ -111,6 +120,7 @@ export function mergeCandidatePollUpdate(
       candidates: update.candidates ?? current.candidates,
       elapsedSeconds: update.elapsedSeconds ?? current.elapsedSeconds,
       expired: current.expired || update.expired === true,
+      failed: current.failed || update.failed === true,
     },
   };
 }
@@ -153,18 +163,14 @@ export function createCandidatePoller(options: CandidatePollerOptions): Candidat
     if (disposed || finished || inFlight) return;
     inFlight = true;
     attempts += 1;
-    let candidates: AgentCandidateImage[] = [];
-    try {
-      const detail = await options.fetchDetail(options.imageSessionId);
-      if (!disposed) {
-        candidates = candidatesFromImageSessionDetail(detail, options.formatLabel);
-      }
-    } catch {
-      candidates = []; // 单次查询失败按未就绪处理，直到达到上限
-    } finally {
-      inFlight = false;
-    }
+    // 单次查询失败按未就绪处理（回落 null），直到达到上限
+    const detail = await options.fetchDetail(options.imageSessionId).catch(() => null);
+    inFlight = false;
     if (disposed) return;
+    let candidates: AgentCandidateImage[] = [];
+    if (detail !== null) {
+      candidates = candidatesFromImageSessionDetail(detail, options.formatLabel);
+    }
     if (candidates.length > 0) {
       partial = candidates;
       if (isReady(candidates)) {
@@ -172,6 +178,12 @@ export function createCandidatePoller(options: CandidatePollerOptions): Candidat
         options.onUpdate({ candidates });
         return;
       }
+    }
+    // 生成任务明确失败：停止轮询并上报失败态（文案在卡片层，不透出技术细节）
+    if (hasFailedGenerationTask(detail)) {
+      finished = true;
+      options.onUpdate({ failed: true });
+      return;
     }
     if (attempts >= maxAttempts) {
       finished = true;

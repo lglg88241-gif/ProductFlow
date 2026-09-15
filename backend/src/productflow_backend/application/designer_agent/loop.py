@@ -7,7 +7,7 @@ from collections.abc import Generator
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -29,6 +29,29 @@ _TOOL_NUDGE_MESSAGE = (
 # 引导对话只需近期上下文；历史截断控制 token 成本与轮次延迟
 MAX_HISTORY_MESSAGES = 20
 _DEFAULT_SESSION_TITLE = "设计师会话"
+
+# LLM 异常的用户可见文案：3 条措辞不同、按会话内失败次数轮换，防止同文案刷屏。
+# 原始异常（含网关/Cloudflare JSON）只进日志，绝不拼进用户文本。
+_LLM_FAILURE_TEMPLATES: tuple[str, str, str] = (
+    "设计模型这会儿连不上，刚才那条没处理成。稍后再发一次，我马上接着干。",
+    "刚和设计大脑的连接断了一下，这一轮没能走完。请把刚才的话再发一次试试。",
+    "模型服务临时抽风了，这条请求没能完成。缓一缓再重发，我随时在。",
+)
+
+
+def _llm_failure_text(db: Session, agent_session_id: str) -> str:
+    """按会话内已落库的失败文案条数轮换模板，连续失败不再一字不差地重复。"""
+    try:
+        prior = db.scalar(
+            select(func.count(AgentMessage.id)).where(
+                AgentMessage.session_id == agent_session_id,
+                AgentMessage.role == "assistant",
+                AgentMessage.content.in_(_LLM_FAILURE_TEMPLATES),
+            )
+        )
+    except SQLAlchemyError:
+        prior = 0
+    return _LLM_FAILURE_TEMPLATES[(prior or 0) % len(_LLM_FAILURE_TEMPLATES)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,12 +190,13 @@ def run_agent_turn(
     for _ in range(MAX_TOOL_ROUNDS):
         try:
             response = client.chat(messages=llm_messages, tools=tool_schemas())
-        except AgentLLMError as exc:
+        except AgentLLMError:
+            logger.exception("Agent LLM 调用失败: session_id=%s", agent_session_id)
             _persist_message(
                 db,
                 agent_session,
                 role="assistant",
-                content=f"我这边连接设计模型时遇到了问题，请稍后再试一次。（{exc}）",
+                content=_llm_failure_text(db, agent_session.id),
             )
             raise
         if not response.tool_calls and not tool_nudged and not used_tools:
@@ -336,15 +360,12 @@ def run_agent_turn_events(
     for _ in range(MAX_TOOL_ROUNDS):
         try:
             response = client.chat(messages=llm_messages, tools=tool_schemas())
-        except AgentLLMError as exc:
-            _persist_message(
-                db,
-                agent_session,
-                role="assistant",
-                content=f"我这边连接设计模型时遇到了问题，请稍后再试一次。（{exc}）",
-            )
+        except AgentLLMError:
+            logger.exception("Agent LLM 调用失败(流式): session_id=%s", agent_session_id)
+            failure_text = _llm_failure_text(db, agent_session.id)
+            _persist_message(db, agent_session, role="assistant", content=failure_text)
             db.expire_all()
-            yield {"event": "error", "data": {"message": str(exc)}}
+            yield {"event": "error", "data": {"message": failure_text}}
             yield from _finish()
             return
         if response.tool_calls:
@@ -409,15 +430,12 @@ def run_agent_turn_events(
             llm_messages.append({"role": "system", "content": _TOOL_NUDGE_MESSAGE})
             try:
                 response = client.chat(messages=llm_messages, tools=tool_schemas())
-            except AgentLLMError as exc:
-                _persist_message(
-                    db,
-                    agent_session,
-                    role="assistant",
-                    content=f"我这边连接设计模型时遇到了问题，请稍后再试一次。（{exc}）",
-                )
+            except AgentLLMError:
+                logger.exception("Agent LLM 调用失败(流式·督促重试): session_id=%s", agent_session_id)
+                failure_text = _llm_failure_text(db, agent_session.id)
+                _persist_message(db, agent_session, role="assistant", content=failure_text)
                 db.expire_all()
-                yield {"event": "error", "data": {"message": str(exc)}}
+                yield {"event": "error", "data": {"message": failure_text}}
                 yield from _finish()
                 return
         assistant_message = _persist_message(

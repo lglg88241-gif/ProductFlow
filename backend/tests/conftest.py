@@ -21,6 +21,17 @@ def _reset_runtime_settings_cache():
     invalidate_runtime_settings_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_shared_openai_client_caches():
+    """模块级 OpenAI 客户端缓存测试间清空：被 monkeypatch 的假 OpenAI 每条用例都重新构造。"""
+
+    from productflow_backend.infrastructure.openai_client_cache import clear_all_caches
+
+    clear_all_caches()
+    yield
+    clear_all_caches()
+
+
 @pytest.fixture()
 def configured_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     database_path = tmp_path / "test.db"

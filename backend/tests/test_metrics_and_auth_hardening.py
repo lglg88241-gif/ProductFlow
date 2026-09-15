@@ -26,8 +26,13 @@ def authed_client(configured_env: Path) -> TestClient:
 
 
 def _seed_usage_data(session) -> tuple[AgentSession, AgentSession]:
-    """两日内若干消息 + 一条 10 天前的旧消息（by_day 应排除、总量应包含）。"""
+    """两日内若干消息 + 一条 10 天前的旧消息（by_day 应排除、总量应包含）。
+
+    以"当天 12:00 UTC"为锚点，保证无论测试在一天的什么时刻运行，种子都不会跨日。
+    """
     now = now_utc()
+    noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    yesterday_noon = noon - timedelta(days=1)
     session_a = AgentSession(title="用量会话A", stage="produce")
     session_b = AgentSession(title="用量会话B", stage="produce")
     session.add_all([session_a, session_b])
@@ -35,7 +40,7 @@ def _seed_usage_data(session) -> tuple[AgentSession, AgentSession]:
 
     messages = [
         # 会话 A：今天两轮（两条 user + 两条带 usage 的 assistant）
-        AgentMessage(session_id=session_a.id, role="user", content="出图", created_at=now - timedelta(minutes=5)),
+        AgentMessage(session_id=session_a.id, role="user", content="出图", created_at=noon - timedelta(minutes=5)),
         AgentMessage(
             session_id=session_a.id,
             role="assistant",
@@ -43,9 +48,9 @@ def _seed_usage_data(session) -> tuple[AgentSession, AgentSession]:
             prompt_tokens=100,
             completion_tokens=50,
             total_tokens=150,
-            created_at=now - timedelta(minutes=4),
+            created_at=noon - timedelta(minutes=4),
         ),
-        AgentMessage(session_id=session_a.id, role="user", content="再改", created_at=now - timedelta(minutes=2)),
+        AgentMessage(session_id=session_a.id, role="user", content="再改", created_at=noon - timedelta(minutes=2)),
         AgentMessage(
             session_id=session_a.id,
             role="assistant",
@@ -53,14 +58,14 @@ def _seed_usage_data(session) -> tuple[AgentSession, AgentSession]:
             prompt_tokens=20,
             completion_tokens=10,
             total_tokens=30,
-            created_at=now - timedelta(minutes=1),
+            created_at=noon - timedelta(minutes=1),
         ),
         # 会话 B：昨天一轮
         AgentMessage(
             session_id=session_b.id,
             role="user",
             content="昨天的问题",
-            created_at=now - timedelta(days=1),
+            created_at=yesterday_noon,
         ),
         AgentMessage(
             session_id=session_b.id,
@@ -69,14 +74,14 @@ def _seed_usage_data(session) -> tuple[AgentSession, AgentSession]:
             prompt_tokens=10,
             completion_tokens=5,
             total_tokens=15,
-            created_at=now - timedelta(days=1) + timedelta(minutes=1),
+            created_at=yesterday_noon + timedelta(minutes=1),
         ),
         # 10 天前的旧数据：不计入 by_day，但计入全量 total_tokens
         AgentMessage(
             session_id=session_b.id,
             role="user",
             content="很久以前",
-            created_at=now - timedelta(days=10),
+            created_at=noon - timedelta(days=10),
         ),
         AgentMessage(
             session_id=session_b.id,
@@ -85,7 +90,7 @@ def _seed_usage_data(session) -> tuple[AgentSession, AgentSession]:
             prompt_tokens=1000,
             completion_tokens=500,
             total_tokens=1500,
-            created_at=now - timedelta(days=10) + timedelta(minutes=1),
+            created_at=noon - timedelta(days=10) + timedelta(minutes=1),
         ),
     ]
     session.add_all(messages)
@@ -105,9 +110,9 @@ def test_metrics_summary_aggregates_sessions_turns_and_tokens(
 ) -> None:
     session_a, _ = _seed_usage_data(db_session)
     _ = session_a
-    now = now_utc()
-    today_key = (now - timedelta(minutes=4)).date().isoformat()
-    yesterday_key = (now - timedelta(days=1)).date().isoformat()
+    noon = now_utc().replace(hour=12, minute=0, second=0, microsecond=0)
+    today_key = noon.date().isoformat()
+    yesterday_key = (noon - timedelta(days=1)).date().isoformat()
 
     response = authed_client.get("/api/metrics/summary")
     assert response.status_code == 200, response.text
@@ -139,7 +144,7 @@ def test_metrics_summary_aggregates_sessions_turns_and_tokens(
         item["prompt_tokens"] == 0 and item["completion_tokens"] == 0 and item["turns"] == 0 for item in zero_days
     )
     # 10 天前的数据不应出现在 by_day
-    old_key = (now - timedelta(days=10)).date().isoformat()
+    old_key = (noon - timedelta(days=10)).date().isoformat()
     assert old_key not in by_key
 
 

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import {
   configValuesFromChangedDrafts,
@@ -18,7 +18,7 @@ import {
   shouldShowSettingsMigrationPanel,
   textBindingPayloadFromDraft,
 } from "./SettingsPage";
-import { translate } from "../lib/i18n";
+import { ensureLocale, translate } from "../lib/i18n";
 import type {
   ConfigItem,
   ConfigResponse,
@@ -27,6 +27,11 @@ import type {
   ProviderProfile,
   SettingsImportPreviewResponse,
 } from "../lib/types";
+
+beforeAll(async () => {
+  // en-US 字典为懒加载模块，先显式加载再断言英文文案
+  await ensureLocale("en-US");
+});
 
 function configItem(overrides: Partial<ConfigItem> & Pick<ConfigItem, "key" | "value">): ConfigItem {
   return {

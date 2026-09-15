@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 
 import type { GalleryEntry } from "../../lib/types";
+import { ensureLocale } from "../../lib/i18n";
 import { galleryEntryAspectRatio, galleryEntrySizeLabel, galleryTileLayout, selectGalleryEntry } from "./helpers";
+
+beforeAll(async () => {
+  // en-US 字典为懒加载模块，先显式加载再断言英文文案
+  await ensureLocale("en-US");
+});
 
 const createdAt = "2026-04-28T00:00:00Z";
 const gridRowUnitPx = 8;

@@ -3,9 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { AgentToolEvent } from "../lib/agentTypes";
+import type { CandidatePollState } from "../lib/candidatePolling";
 import { translate } from "../lib/i18n";
 import {
   MultiCandidateCard,
+  candidateFailureActions,
   candidatesFromResult,
   pendingCandidateCount,
   shouldRenderMultiCandidates,
@@ -83,12 +85,12 @@ describe("MultiCandidateCard 轮询态", () => {
     },
   ];
 
-  function renderWithPoll(result: AgentToolEvent["result"], poll?: { candidates: typeof polledCandidates; elapsedSeconds: number; expired: boolean }) {
+  function renderWithPoll(result: AgentToolEvent["result"], poll?: Partial<CandidatePollState>) {
     return renderToStaticMarkup(
       createElement(MultiCandidateCard, {
         event: toolEvent(result),
         onContinue: () => undefined,
-        poll,
+        poll: { candidates: [], elapsedSeconds: 0, expired: false, failed: false, ...poll },
       }),
     );
   }
@@ -131,5 +133,39 @@ describe("MultiCandidateCard 轮询态", () => {
     );
     expect(html).toContain('src="https://cdn.example.com/9.png"');
     expect(html).not.toContain('src="/api/image-session-assets/asset-1/download?variant=preview"');
+  });
+});
+
+describe("MultiCandidateCard 轮询失败态", () => {
+  function renderFailed(poll?: Partial<CandidatePollState>) {
+    return renderToStaticMarkup(
+      createElement(MultiCandidateCard, {
+        event: toolEvent({ candidates: [], pending: true, expected_candidates: 2, image_session_id: "s1" }),
+        onContinue: () => undefined,
+        poll: { candidates: [], elapsedSeconds: 0, expired: false, failed: false, ...poll },
+      }),
+    );
+  }
+
+  it("轮询发现生成失败时显示失败文案与两个建议按钮，不透出技术细节", () => {
+    const html = renderFailed({ failed: true });
+    expect(html).toContain(translate("zh-CN", "workbench.candidate.pendingFailed"));
+    expect(html).toContain(translate("zh-CN", "workbench.candidate.pendingFailedRetry"));
+    expect(html).toContain(translate("zh-CN", "workbench.candidate.pendingFailedStyle"));
+    // 失败态不显示等待/超时兜底文案
+    expect(html).not.toContain(translate("zh-CN", "workbench.candidate.pendingWaiting", { count: 2, seconds: 0 }));
+    expect(html).not.toContain(translate("zh-CN", "workbench.candidate.pendingTimeout"));
+  });
+
+  it("两个建议按钮的预填草稿走 onContinue 契约：我重试一次 / 换个风格再来一版", () => {
+    const actions = candidateFailureActions((key) => translate("zh-CN", key));
+    expect(actions.map((action) => action.draft)).toEqual(["我重试一次", "换个风格再来一版"]);
+    expect(actions.map((action) => action.label)).toEqual(["重试一次", "换个风格"]);
+  });
+
+  it("无失败标记时超时兜底仍生效（不提前进入失败态）", () => {
+    const html = renderFailed({ expired: true, elapsedSeconds: 120 });
+    expect(html).toContain(translate("zh-CN", "workbench.candidate.pendingTimeout"));
+    expect(html).not.toContain(translate("zh-CN", "workbench.candidate.pendingFailed"));
   });
 });

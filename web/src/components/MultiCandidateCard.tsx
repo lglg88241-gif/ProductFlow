@@ -2,7 +2,7 @@ import { Loader2 } from "lucide-react";
 
 import type { AgentToolEvent } from "../lib/agentTypes";
 import type { CandidatePollState } from "../lib/candidatePolling";
-import { useI18n } from "../lib/preferences";
+import { useI18n, type TranslateFunction } from "../lib/preferences";
 
 /** generate_image tool_result 中的单张候选图（契约：asset_id / url / label，主键为 UUID 字符串）。 */
 export interface AgentCandidateImage {
@@ -34,6 +34,26 @@ export function shouldRenderMultiCandidates(result: AgentToolEvent["result"]): b
 export function pendingCandidateCount(result: AgentToolEvent["result"]): number | null {
   const expected = result.expected_candidates;
   return typeof expected === "number" && Number.isFinite(expected) ? expected : null;
+}
+
+/** 失败态的建议动作（人话文案 + 预填草稿），渲染为按钮、点击后经 onContinue 发送草稿。 */
+export interface CandidateFailureAction {
+  label: string;
+  draft: string;
+}
+
+/** 失败态的两个建议动作：重试一次 / 换个风格（预填文案走 onContinue 草稿机制）。 */
+export function candidateFailureActions(t: TranslateFunction): CandidateFailureAction[] {
+  return [
+    {
+      label: t("workbench.candidate.pendingFailedRetry"),
+      draft: t("workbench.candidate.pendingFailedRetryDraft"),
+    },
+    {
+      label: t("workbench.candidate.pendingFailedStyle"),
+      draft: t("workbench.candidate.pendingFailedStyleDraft"),
+    },
+  ];
 }
 
 /** pending 态占位：轮询中显示已等待秒数，超限或无轮询能力时显示对应兜底文案。 */
@@ -70,6 +90,26 @@ export function MultiCandidateCard({
   if (candidates.length === 0) {
     if (event.result.pending !== true) return null;
     const count = pendingCandidateCount(event.result) ?? 0;
+    if (poll?.failed) {
+      // 生成任务明确失败：人话文案 + 建议按钮，不透出任何技术细节
+      return (
+        <div className="mt-2 space-y-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          <p>{t("workbench.candidate.pendingFailed")}</p>
+          <div className="flex gap-2">
+            {candidateFailureActions(t).map((action) => (
+              <button
+                key={action.label}
+                type="button"
+                onClick={() => onContinue(action.draft)}
+                className="rounded-lg border border-rose-300 bg-white px-2 py-1 text-xs font-medium text-rose-700 hover:border-rose-400"
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
     if (poll?.expired) {
       return <PendingPlaceholder expired text={t("workbench.candidate.pendingTimeout")} />;
     }

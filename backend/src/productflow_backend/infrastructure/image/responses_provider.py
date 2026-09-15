@@ -30,6 +30,7 @@ from productflow_backend.infrastructure.image.base import (
     image_dimensions_from_bytes,
     parse_size,
 )
+from productflow_backend.infrastructure.openai_client_cache import KeyedClientCache
 from productflow_backend.infrastructure.prompts import render_prompt_template
 from productflow_backend.infrastructure.provider_config import (
     ResolvedImageProviderConfig,
@@ -52,6 +53,9 @@ PROVIDER_TEXT_OUTPUT_MESSAGE = "图片供应商已完成请求，但返回的是
 IMAGE_PROVIDER_HTTP_CONNECT_TIMEOUT_SECONDS = 10.0
 
 logger = logging.getLogger(__name__)
+
+# 按 (api_key, base_url, 超时预算) 复用 OpenAI 客户端；超时预算变化编入缓存键，语义不回退
+_OPENAI_CLIENTS = KeyedClientCache()
 
 
 def image_provider_http_timeout(read_seconds: float | None = None) -> httpx.Timeout:
@@ -293,7 +297,16 @@ class OpenAIResponsesImageClient:
         # 超时判失败并落明确 failure_reason，避免无限轮询只能靠 worker time_limit 兜底。
         deadline = monotonic() + self.provider_timeout_seconds
         try:
-            client = OpenAI(**client_kwargs)
+            timeout_budget = client_kwargs["timeout"]
+            cache_key = (
+                self.api_key,
+                self.base_url or None,
+                timeout_budget.connect,
+                timeout_budget.read,
+                timeout_budget.write,
+                timeout_budget.pool,
+            )
+            client = _OPENAI_CLIENTS.get_or_create(cache_key, lambda: OpenAI(**client_kwargs))
         except Exception as exc:  # noqa: BLE001
             self._log_provider_exception(
                 "初始化 Responses 图片供应商失败",

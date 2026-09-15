@@ -9,9 +9,15 @@ from typing import Any, Protocol
 
 from openai import OpenAI
 
+from productflow_backend.infrastructure.openai_client_cache import KeyedClientCache
 from productflow_backend.infrastructure.provider_config import resolve_agent_provider_config
 
 logger = logging.getLogger(__name__)
+
+# Agent 轮次超时预算：客户端构造参数与调用语义保持不变，仅实例改为按连接参数复用
+_AGENT_LLM_TIMEOUT_SECONDS = 120.0
+# 按 (api_key, base_url, timeout) 复用 OpenAI 客户端：避免每轮重建 httpx 连接池
+_OPENAI_CLIENTS = KeyedClientCache()
 
 # 降级日志只输出错误摘要：限长并抹除疑似密钥片段，严防 API key 进入日志
 _SENSITIVE_KEY_PATTERN = re.compile(
@@ -115,7 +121,11 @@ class OpenAICompatAgentClient:
     def __init__(self, *, provider_name: str, api_key: str, base_url: str | None, model: str) -> None:
         self.provider_name = provider_name
         self.model = model
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        cache_key = (api_key, base_url or None, _AGENT_LLM_TIMEOUT_SECONDS)
+        self._client = _OPENAI_CLIENTS.get_or_create(
+            cache_key,
+            lambda: OpenAI(api_key=api_key, base_url=base_url, timeout=_AGENT_LLM_TIMEOUT_SECONDS),
+        )
 
     def chat(
         self,

@@ -5,9 +5,11 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from productflow_backend.application.image_sessions import (
+    MAX_IMAGE_SESSION_LIST_LIMIT,
     add_image_session_reference_images,
     attach_image_session_asset_to_product,
     cancel_image_session_generation_task,
+    count_image_sessions,
     create_image_session,
     delete_image_session,
     delete_image_session_reference_image,
@@ -49,10 +51,15 @@ router = APIRouter(prefix="/api", tags=["image-sessions"], dependencies=[Depends
 
 @router.get("/image-sessions", response_model=ImageSessionListResponse)
 def list_image_sessions_endpoint(
+    limit: int = Query(default=50, ge=1, le=MAX_IMAGE_SESSION_LIST_LIMIT),
+    offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
 ) -> ImageSessionListResponse:
-    items = list_image_sessions(session)
-    return ImageSessionListResponse(items=[serialize_image_session_summary(item) for item in items])
+    items = list_image_sessions(session, limit=limit, offset=offset)
+    return ImageSessionListResponse(
+        items=[serialize_image_session_summary(item) for item in items],
+        total=count_image_sessions(session),
+    )
 
 
 @router.post("/image-sessions", response_model=ImageSessionDetailResponse, status_code=status.HTTP_201_CREATED)

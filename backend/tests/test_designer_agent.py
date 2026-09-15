@@ -332,7 +332,9 @@ def test_agent_message_stream_reports_llm_error(configured_env: Path) -> None:
         body = "".join(response.iter_text())
 
     assert "event: error" in body
-    assert "AGENT_*" in body
+    # 用户只见人话，不含任何配置/技术细节
+    assert "设计师模型暂时没有响应" in body
+    assert "AGENT_*" not in body
     assert "event: done" in body
 
 

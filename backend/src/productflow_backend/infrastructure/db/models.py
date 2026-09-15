@@ -412,6 +412,8 @@ class ImageSession(Base, TimestampMixin):
     """连续生图会话，含多轮对话历史与生成结果。"""
 
     __tablename__ = "image_sessions"
+    # 列表按 updated_at 降序分页
+    __table_args__ = (Index("ix_image_sessions_updated_at", "updated_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     title: Mapped[str] = mapped_column(String(255))
@@ -604,6 +606,8 @@ class AgentSession(Base):
     """设计师 Agent 会话：对话式制图的主入口。"""
 
     __tablename__ = "agent_sessions"
+    # 会话列表按 updated_at 降序排序
+    __table_args__ = (Index("ix_agent_sessions_updated_at", "updated_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     title: Mapped[str] = mapped_column(String(120), default="设计师会话")
@@ -688,6 +692,8 @@ class CopyReport(Base):
     __tablename__ = "copy_reports"
     __table_args__ = (
         Index("ix_copy_reports_agent_session_created", "agent_session_id", "created_at"),
+        # 报告列表不按会话过滤时按 created_at 降序排序
+        Index("ix_copy_reports_created_at", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
