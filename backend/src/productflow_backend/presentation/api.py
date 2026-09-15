@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -68,22 +67,15 @@ def create_app() -> FastAPI:
         except SQLAlchemyError:
             logging.getLogger(__name__).warning("内置素材库样板导入失败，跳过（下次启动重试）", exc_info=True)
         if not get_runtime_settings().admin_access_required:
-            # production 下管理员门禁被关闭属于致命配置错误：拒绝启动（fail-fast）。
-            # 逃生口 ADMIN_GATE_OPEN_IN_PRODUCTION=1 用于"明确的内网工具"部署——
-            # 它表达的是部署者的显式选择，此时降级为大声音量告警而非拒绝启动。
+            # production 下关闭门禁属于致命配置错误：直接拒绝启动，不提供绕过开关。
+            # 本地验收请使用 APP_ENV=development（见 .env.example），而不是在 production 上开后门——
+            # 后门一旦存在，任何"临时关一下"都会在生产环境长期驻留。
             if get_settings().app_env.strip().lower() == "production":
-                if os.getenv("ADMIN_GATE_OPEN_IN_PRODUCTION", "").strip() == "1":
-                    logging.getLogger(__name__).warning(
-                        "ADMIN_GATE_OPEN_IN_PRODUCTION=1：production 下管理员门禁保持关闭（API 对所有来源开放）。"
-                        "仅限内网部署；暴露公网前请关闭此开关并设置 ADMIN_ACCESS_REQUIRED=true"
-                    )
-                else:
-                    raise RuntimeError(
-                        "production 环境必须开启管理员访问密钥（ADMIN_ACCESS_REQUIRED=true），已拒绝启动；"
-                        "如确为内网部署，可在环境变量中显式设置 ADMIN_GATE_OPEN_IN_PRODUCTION=1"
-                    )
-            else:
-                logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
+                raise RuntimeError(
+                    "production 环境必须开启管理员访问密钥（ADMIN_ACCESS_REQUIRED=true），已拒绝启动。"
+                    "本地 HTTP 验收请设置 APP_ENV=development"
+                )
+            logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
         if not get_settings().session_cookie_secure:
             logging.getLogger(__name__).warning(
                 "SESSION_COOKIE_SECURE 未开启：会话 Cookie 将通过非加密连接传输（公网部署请配置 HTTPS 并开启）"

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from datetime import timedelta
 from pathlib import Path
 
@@ -255,25 +254,45 @@ def test_production_startup_fails_fast_when_admin_gate_disabled(
         invalidate_runtime_settings_cache()
 
 
-def test_production_escape_hatch_keeps_gate_open_with_warning(
-    configured_env: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_escape_hatch_is_gone_so_production_cannot_open_the_gate(
+    configured_env: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ADMIN_GATE_OPEN_IN_PRODUCTION=1 表达部署者显式选择：不拒绝启动，但大声告警。"""
+    """审计要求：删除"production 下关闭门禁"的逃生口。
+
+    本地验收应使用 APP_ENV=development；一旦存在绕过开关，它就会在生产环境长期驻留。
+    """
     from productflow_backend.presentation.api import create_app
 
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("ADMIN_ACCESS_REQUIRED", "false")
-    monkeypatch.setenv("ADMIN_GATE_OPEN_IN_PRODUCTION", "1")
+    monkeypatch.setenv("ADMIN_GATE_OPEN_IN_PRODUCTION", "1")  # 旧逃生口：现在必须无效
     get_settings.cache_clear()
     invalidate_runtime_settings_cache()
     try:
-        with caplog.at_level(logging.WARNING):
-            with TestClient(create_app()) as client:
-                assert client.get("/healthz").status_code == 200
+        with pytest.raises(RuntimeError, match="production"):
+            with TestClient(create_app()):
+                pass
     finally:
         get_settings.cache_clear()
         invalidate_runtime_settings_cache()
-    assert any("ADMIN_GATE_OPEN_IN_PRODUCTION" in record.getMessage() for record in caplog.records)
+
+
+def test_development_env_allows_local_acceptance_without_gate(
+    configured_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本地验收路径仍然可用：APP_ENV=development + 关闭门禁 → 正常启动。"""
+    from productflow_backend.presentation.api import create_app
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("ADMIN_ACCESS_REQUIRED", "false")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+    try:
+        with TestClient(create_app()) as client:
+            assert client.get("/healthz").status_code == 200
+    finally:
+        get_settings.cache_clear()
+        invalidate_runtime_settings_cache()
 
 
 def test_production_startup_allows_admin_gate_enabled(

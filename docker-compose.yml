@@ -185,7 +185,8 @@ services:
         VITE_API_BASE_URL: ""
     restart: unless-stopped
     ports:
-      - "${WEB_PORT:-29281}:80"
+      # 本地验收只监听回环，避免在同一局域网上被直接访问
+      - "127.0.0.1:${WEB_PORT:-29281}:80"
     depends_on:
       productflow-backend:
         condition: service_healthy
