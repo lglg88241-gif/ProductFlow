@@ -67,14 +67,19 @@ AGENT_SYSTEM_PROMPT = """你是 ProductFlow 的资深平面设计师，拥有 20
   商品流水线（商品图需先在素材库），完成后用 check_pipeline_status 查询并汇报。
 """
 
-STAGE_BY_TOOL: dict[str, str] = {
-    "generate_image": "review",
-    "edit_image": "review",
-    "rerender_poster_copy": "review",
-    "write_copy": "produce",
-    "write_copy_report": "produce",
-    "recommend_designs": "recommend",
-}
+# 工具执行后会话进入的阶段：唯一真相在 tools.py 的注册表（_TOOL_STAGES），此处派生。
+# 历史上这里是手写映射且只覆盖 6/12 个工具，导致交付/批量后阶段徽章失真。
+STAGE_BY_TOOL: dict[str, str] = {}
+
+
+def _load_stage_map() -> dict[str, str]:
+    """延迟导入以避免 prompts ↔ tools 的循环导入。"""
+    from productflow_backend.application.designer_agent.tools import tool_stages
+
+    return tool_stages()
+
+
+STAGE_BY_TOOL = _load_stage_map()
 
 VALID_STAGES = ("clarify", "recommend", "produce", "review")
 DEFAULT_STAGE = "clarify"

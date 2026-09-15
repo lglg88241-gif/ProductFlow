@@ -81,3 +81,42 @@ def test_rerender_poster_copy_routes_away_from_redraw() -> None:
     """rerender_poster_copy 描述要指明改画面时应转用 edit_image/generate_image。"""
     description = _schema_by_name()["rerender_poster_copy"]["description"]
     assert "edit_image" in description and "generate_image" in description
+
+
+def test_registry_schema_and_stage_maps_stay_in_sync() -> None:
+    """工具脊柱契约：schema / 执行器 / 阶段映射三者必须一一对应。
+
+    这是"加工具只需登记一次"的护栏——任何一处漏登记都会在这里失败，
+    而不是等到线上发现模型调了个不存在的工具、或阶段徽章不动。
+    """
+    from productflow_backend.application.designer_agent.prompts import STAGE_BY_TOOL, VALID_STAGES
+    from productflow_backend.application.designer_agent.tools import tool_names, tool_schemas
+
+    schema_names = {item["function"]["name"] for item in tool_schemas()}
+    handler_names = set(tool_names())
+
+    assert schema_names == handler_names, {
+        "有 schema 无执行器": sorted(schema_names - handler_names),
+        "有执行器无 schema": sorted(handler_names - schema_names),
+    }
+
+    missing_stage = schema_names - set(STAGE_BY_TOOL)
+    assert not missing_stage, f"这些工具缺少阶段映射（阶段徽章会失真）: {sorted(missing_stage)}"
+    assert set(STAGE_BY_TOOL) <= schema_names, sorted(set(STAGE_BY_TOOL) - schema_names)
+    invalid = {name: stage for name, stage in STAGE_BY_TOOL.items() if stage not in VALID_STAGES}
+    assert not invalid, f"阶段值不在 VALID_STAGES 内: {invalid}"
+
+
+def test_tool_schemas_module_is_single_source_for_constants() -> None:
+    """导出枚举与多候选上下限只应有一处定义（历史上重复三处）。"""
+    import productflow_backend.application.designer_agent.tool_schemas as schemas
+    import productflow_backend.application.designer_agent.tools as tools
+
+    assert tools.SUPPORTED_EXPORT_GRIDS is schemas.SUPPORTED_EXPORT_GRIDS
+    assert tools.GENERATION_COUNT_MAX == schemas.GENERATION_COUNT_MAX
+
+    grid_schema = next(
+        item for item in schemas.TOOL_SCHEMAS if item["function"]["name"] == "export_moments_grid"
+    )
+    enum = grid_schema["function"]["parameters"]["properties"]["grid"]["enum"]
+    assert tuple(enum) == schemas.SUPPORTED_EXPORT_GRIDS
