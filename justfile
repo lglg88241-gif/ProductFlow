@@ -58,6 +58,14 @@ release:
 release-dry-run:
     DRY_RUN=1 bash scripts/release.sh
 
+# Agent 质量评测（golden set）：真实模型跑一批小白需求，给路由/澄清/话术打分
+agent-eval:
+    uv run --directory backend python scripts/agent_eval.py --base-url http://127.0.0.1:${WEB_PORT:-29281} --admin-key ${ADMIN_ACCESS_KEY}
+
+# 含生图场景的完整评测（消耗生图额度）
+agent-eval-full:
+    uv run --directory backend python scripts/agent_eval.py --base-url http://127.0.0.1:${WEB_PORT:-29281} --admin-key ${ADMIN_ACCESS_KEY} --include-costly
+
 # 备份 Postgres + media 存储 + Redis 快照到 ./backups/<时间戳>/
 backup:
     bash scripts/backup.sh

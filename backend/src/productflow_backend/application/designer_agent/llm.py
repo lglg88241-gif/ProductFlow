@@ -121,6 +121,8 @@ class OpenAICompatAgentClient:
     def __init__(self, *, provider_name: str, api_key: str, base_url: str | None, model: str) -> None:
         self.provider_name = provider_name
         self.model = model
+        # 保留地址便于诊断（降级切换/排障时需要知道实际打的是哪个中转站）
+        self.base_url = base_url
         cache_key = (api_key, base_url or None, _AGENT_LLM_TIMEOUT_SECONDS)
         self._client = _OPENAI_CLIENTS.get_or_create(
             cache_key,
@@ -227,14 +229,19 @@ def build_agent_llm_client() -> AgentLLMClient:
         base_url=config.base_url,
         model=config.model,
     )
-    if not config.fallback_provider_profile_id:
-        return primary
+    # 降级是否可用看"有没有 key + 模型"，不能看 fallback_provider_profile_id：
+    # 后者只在界面绑定路径产生，.env 直填（中转场景）永远拿不到它——
+    # 历史实现因此在 env-first 下静默丢弃用户已经配好的降级链。
     if not config.fallback_api_key or not config.fallback_model:
-        raise AgentLLMError("降级供应商配置不完整（缺 API Key 或 fallback_model），请在系统设置中补全")
+        if config.fallback_provider_profile_id:
+            raise AgentLLMError("降级供应商配置不完整（缺 API Key 或 fallback_model），请在系统设置中补全")
+        return primary
     fallback = OpenAICompatAgentClient(
         provider_name=f"{config.provider_kind}:fallback",
         api_key=config.fallback_api_key,
-        base_url=config.fallback_base_url,
+        # 同站点换模型是最常见形态：未单独给 fallback 地址时沿用主供应商地址，
+        # 避免静默落到默认公网地址。
+        base_url=config.fallback_base_url or config.base_url,
         model=config.fallback_model,
     )
     return FallbackAgentLLMClient(primary=primary, fallback=fallback)

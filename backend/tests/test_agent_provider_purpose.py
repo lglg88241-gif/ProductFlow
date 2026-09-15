@@ -311,3 +311,53 @@ def test_healthz_reports_provider_summary_without_secrets(configured_env: Path) 
     assert set(providers) == {"agent", "image"}
     assert "api_key" not in json.dumps(providers)
     assert providers["agent"]["kind"] in {"mock", "openai"}
+
+
+def test_env_first_fallback_is_wired_without_ui_profile_id(configured_env, monkeypatch) -> None:
+    """回归：只用 .env 配置主+备（无界面 profile id）时，降级链必须真的装上。
+
+    历史 bug：构造逻辑拿 fallback_provider_profile_id 当开关，而该字段只在界面
+    绑定路径产生 —— 结果 .env 直填的中转场景下用户配好的降级被静默丢弃，
+    并在主用模型下线时表现为"全部 503 且没有任何降级日志"。
+    """
+    from productflow_backend.application.designer_agent.llm import FallbackAgentLLMClient, build_agent_llm_client
+
+    monkeypatch.setenv("AGENT_PROVIDER_KIND", "openai")
+    monkeypatch.setenv("AGENT_API_KEY", "sk-primary")
+    monkeypatch.setenv("AGENT_BASE_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("AGENT_MODEL", "primary-model")
+    monkeypatch.setenv("AGENT_FALLBACK_API_KEY", "sk-fallback")
+    monkeypatch.setenv("AGENT_FALLBACK_MODEL", "backup-model")
+    monkeypatch.delenv("AGENT_FALLBACK_BASE_URL", raising=False)
+
+    from productflow_backend.config import invalidate_runtime_settings_cache
+
+    invalidate_runtime_settings_cache()
+
+    client = build_agent_llm_client()
+    assert isinstance(client, FallbackAgentLLMClient), "env-first 配置的降级链没有被装上"
+    assert client.primary.model == "primary-model"
+    assert client.fallback.model == "backup-model"
+    # 未单独给 fallback 地址时应沿用主供应商地址，而不是落到默认公网地址
+    assert client.fallback.base_url == "https://relay.example.com/v1"
+
+
+def test_primary_only_when_no_fallback_configured(configured_env, monkeypatch) -> None:
+    """没配降级时只返回主供应商（不应报错、也不应硬塞一个降级）。"""
+    from productflow_backend.application.designer_agent.llm import (
+        FallbackAgentLLMClient,
+        OpenAICompatAgentClient,
+        build_agent_llm_client,
+    )
+    from productflow_backend.config import invalidate_runtime_settings_cache
+
+    monkeypatch.setenv("AGENT_PROVIDER_KIND", "openai")
+    monkeypatch.setenv("AGENT_API_KEY", "sk-primary")
+    monkeypatch.setenv("AGENT_BASE_URL", "https://relay.example.com/v1")
+    monkeypatch.delenv("AGENT_FALLBACK_API_KEY", raising=False)
+    monkeypatch.delenv("AGENT_FALLBACK_MODEL", raising=False)
+    invalidate_runtime_settings_cache()
+
+    client = build_agent_llm_client()
+    assert isinstance(client, OpenAICompatAgentClient)
+    assert not isinstance(client, FallbackAgentLLMClient)
