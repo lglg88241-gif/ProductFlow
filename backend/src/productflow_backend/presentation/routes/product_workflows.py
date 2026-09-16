@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
+from productflow_backend.application.isolation import current_owner_id, ensure_row_readable
 from productflow_backend.application.product_workflows import (
     apply_node_group_template_to_workflow,
     archive_user_canvas_template,
@@ -24,7 +25,14 @@ from productflow_backend.application.product_workflows import (
     update_workflow_node,
     upload_workflow_node_image,
 )
-from productflow_backend.presentation.deps import get_session, require_admin
+from productflow_backend.infrastructure.db.models import (
+    Product,
+    ProductWorkflow,
+    UserAccount,
+    WorkflowEdge,
+    WorkflowNode,
+)
+from productflow_backend.presentation.deps import get_session, require_admin, require_business_user
 from productflow_backend.presentation.schemas.product_workflows import (
     ApplyWorkflowTemplateGroupRequest,
     BindWorkflowNodeImageRequest,
@@ -47,7 +55,86 @@ from productflow_backend.presentation.schemas.product_workflows import (
 )
 from productflow_backend.presentation.upload_validation import read_validated_image_upload
 
-router = APIRouter(prefix="/api", tags=["product-workflows"], dependencies=[Depends(require_admin)])
+
+def require_resource_owner(
+    request: Request,
+    session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
+) -> None:
+    """路由级归属守卫（审计 S0-01）。
+
+    工作流端点此前只挂 require_admin：持有他人的 product_id / node_id / edge_id 即可
+    跨用户读写。这里按**路径参数**解析锚点资源并统一判定归属——一处覆盖全部端点，
+    新增端点也自动受保护，避免"逐端点补校验"再次漏项。
+
+    node/edge → workflow → product → owner；跨用户一律 404 语义；
+    owner_id 为 None（隔离关闭）时直接放行，保持现状。
+    """
+    owner_id = current_owner_id(user)
+    if owner_id is None:
+        return
+    params = request.path_params
+    if "product_id" in params:
+        _owned_product(session, params["product_id"], owner_id)
+    elif "node_id" in params:
+        _owner_for_node(session, params["node_id"], owner_id)
+    elif "edge_id" in params:
+        _owner_for_edge(session, params["edge_id"], owner_id)
+
+
+def _owned_product(session: Session, product_id: str, owner_id: str | None) -> None:
+    product = session.get(Product, product_id)
+    if product is None:
+        from productflow_backend.domain.errors import NotFoundError
+
+        raise NotFoundError("商品不存在")
+    ensure_row_readable(product, owner_id, message="商品不存在")
+
+
+def _owner_for_node(session: Session, node_id: str, owner_id: str | None) -> None:
+    """按节点归属判定：node → workflow → product → owner。"""
+    from productflow_backend.domain.errors import NotFoundError
+
+    node = session.get(WorkflowNode, node_id)
+    if node is None:
+        raise NotFoundError("工作流节点不存在")
+    workflow = session.get(ProductWorkflow, node.workflow_id)
+    if workflow is None:
+        raise NotFoundError("工作流节点不存在")
+    _owned_product(session, workflow.product_id, owner_id)
+
+
+def _owner_for_edge(session: Session, edge_id: str, owner_id: str | None) -> None:
+    """按连线归属判定：edge → workflow → product → owner。"""
+    from productflow_backend.domain.errors import NotFoundError
+
+    edge = session.get(WorkflowEdge, edge_id)
+    if edge is None:
+        raise NotFoundError("工作流连线不存在")
+    workflow = session.get(ProductWorkflow, edge.workflow_id)
+    if workflow is None:
+        raise NotFoundError("工作流连线不存在")
+    _owned_product(session, workflow.product_id, owner_id)
+
+
+def _guard_and_owner(session: Session, user: UserAccount | None) -> str | None:
+    """统一的 owner 取值：隔离开启返回用户 id，关闭返回 None（守卫内自行短路）。"""
+    return current_owner_id(user)
+
+
+router = APIRouter(
+    prefix="/api",
+    tags=["product-workflows"],
+    dependencies=[Depends(require_admin), Depends(require_resource_owner)],
+)
+
+
+# ---------------------------------------------------------------------------
+# 归属守卫（审计 S0-01）：工作流端点此前只挂 require_admin，没有任何 owner 校验，
+# 持有他人 product_id / node_id / edge_id 即可跨用户读写。这里在路由层用**锚点资源**
+# 统一判定：node/edge → workflow → product → owner。跨用户一律 NotFoundError
+# （与"不存在"同文案，不泄漏存在性）；owner_id 为 None（隔离关闭）时放行保持现状。
+# ---------------------------------------------------------------------------
 
 
 @router.get("/products/{product_id}/workflow", response_model=ProductWorkflowResponse)

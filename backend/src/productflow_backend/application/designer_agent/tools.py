@@ -207,7 +207,7 @@ _TOOL_HANDLERS: dict[str, Callable[[ToolContext], dict[str, Any]]] = {
     "save_asset": _run_save_asset,
     "export_moments_grid": lambda ctx: _run_export_grid(ctx.db, ctx.agent_session, ctx.arguments),
     "run_product_pipeline": lambda ctx: _run_product_pipeline(ctx.db, ctx.agent_session, ctx.arguments),
-    "check_pipeline_status": lambda ctx: _run_check_pipeline(ctx.db, ctx.arguments),
+    "check_pipeline_status": lambda ctx: _run_check_pipeline(ctx.db, ctx.agent_session, ctx.arguments),
     "recommend_designs": lambda ctx: _run_recommend_designs(ctx.db, ctx.llm, ctx.arguments),
     "write_copy_report": lambda ctx: _run_write_copy_report(ctx.db, ctx.agent_session, ctx.llm, ctx.arguments),
     "rerender_poster_copy": lambda ctx: _run_rerender_poster_copy(ctx.db, ctx.arguments),
@@ -435,9 +435,11 @@ def _run_product_pipeline(db: Session, agent_session: AgentSession, arguments: d
         return {"status": "error", "message": "商品名不能为空。"}
     if not library_asset_id:
         return {"status": "error", "message": "需要商品主图：请先上传商品图，或告诉我素材库里的图片。"}
+    # 归属从会话取，绝不从模型参数取：否则 A 可引用 B 的素材（审计 S2，S0 级越权链）
+    owner_id = agent_session.owner_id
     try:
-        entry = get_asset_entry(db, library_asset_id)
-    except Exception:  # noqa: BLE001
+        entry = get_asset_entry(db, library_asset_id, owner_id)
+    except Exception:  # noqa: BLE001 - 跨用户素材与不存在同文案，不泄漏存在性
         return {"status": "error", "message": "素材库里找不到这张商品图，请确认后再试。"}
 
     raw = LocalStorage().resolve(entry.storage_path).read_bytes()
@@ -451,6 +453,8 @@ def _run_product_pipeline(db: Session, agent_session: AgentSession, arguments: d
         filename=f"pipeline-{library_asset_id[:8]}.png",
         content_type=entry.mime_type,
         canvas_template_key=str(arguments.get("canvas_template_key") or "ecommerce-main-image-v1"),
+        # 新建商品必须继承会话归属，否则会落成 owner_id=NULL（=全局可见）
+        owner_id=owner_id,
     )
     workflow = submit_product_workflow_run(db, product_id=product.id)
     latest_run = workflow.runs[0] if workflow.runs else None
@@ -467,19 +471,22 @@ def _run_product_pipeline(db: Session, agent_session: AgentSession, arguments: d
     }
 
 
-def _run_check_pipeline(db: Session, arguments: dict[str, Any]) -> dict[str, Any]:
+def _run_check_pipeline(
+    db: Session, agent_session: AgentSession, arguments: dict[str, Any]
+) -> dict[str, Any]:
     from productflow_backend.application.product_workflows import get_product_workflow_status
     from productflow_backend.application.use_cases import get_product_detail
 
+    owner_id = agent_session.owner_id
     product_id = str(arguments.get("product_id", "")).strip()
     if not product_id:
         return {"status": "error", "message": "缺少商品 id。"}
     try:
-        product = get_product_detail(db, product_id)
-    except Exception:  # noqa: BLE001
+        product = get_product_detail(db, product_id, owner_id)
+    except Exception:  # noqa: BLE001 - 跨用户与不存在同文案
         return {"status": "error", "message": "找不到这个商品。"}
 
-    snapshot = get_product_workflow_status(db, product_id)
+    snapshot = get_product_workflow_status(db, product_id, owner_id=owner_id)
     run = snapshot.runs[0] if snapshot.runs else None
     run_status = run.status if run is not None else "未运行"
     posters = [

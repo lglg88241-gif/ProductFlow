@@ -165,3 +165,76 @@ def test_null_owner_rows_are_globally_readable(
         assets = client.get("/api/agent/assets").json()
         builtin = [item for item in assets["items"] if item.get("source") == "builtin"]
         assert builtin, "内置模板应对所有用户可见"
+
+
+# ---------------------------------------------------------------------------
+# 审计 S0-01：商品工作流端点此前只挂 require_admin、零 owner 校验
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_endpoints_are_isolated_by_product_owner(
+    isolation_env: None, configured_env: Path, db_session
+) -> None:
+    """工作流读取/状态/节点/连线：B 持有 A 的 id 也必须 404（审计 S0-01）。"""
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    alice, _ = _make_user_client(app, db_session, "wf_a")
+    bob, _ = _make_user_client(app, db_session, "wf_b")
+
+    created = alice.post(
+        "/api/products", data={"name": "A 的工作流商品"}, files={"image": ("m.png", _png(), "image/png")}
+    )
+    assert created.status_code == 201, created.text
+    product_id = created.json()["id"]
+
+    # 先让 A 自己访问成功（确认路径本身可用）
+    assert alice.get(f"/api/products/{product_id}/workflow").status_code == 200
+    assert alice.get(f"/api/products/{product_id}/workflow/status").status_code == 200
+
+    # B 越权：读取工作流、状态、创建节点、跑、取消、重试、加连线 → 一律 404
+    assert bob.get(f"/api/products/{product_id}/workflow").status_code == 404
+    assert bob.get(f"/api/products/{product_id}/workflow/status").status_code == 404
+    assert (
+        bob.post(
+            f"/api/products/{product_id}/workflow/nodes",
+            json={"node_type": "copy_generation", "title": "偷建节点", "position_x": 0, "position_y": 0},
+        ).status_code
+        in {404, 422}
+    )
+    assert bob.post(f"/api/products/{product_id}/workflow/run", json={}).status_code == 404
+
+    # A 的工作流里取一个真实 node_id，验证节点级越权同样 404
+    workflow = alice.get(f"/api/products/{product_id}/workflow").json()
+    nodes = workflow.get("nodes") or []
+    if nodes:
+        node_id = nodes[0]["id"]
+        assert bob.patch(f"/api/workflow-nodes/{node_id}", json={"title": "偷改"}).status_code == 404
+        assert bob.delete(f"/api/workflow-nodes/{node_id}").status_code == 404
+        # A 自己仍可改（确认越权失败没有副作用）
+        assert alice.patch(f"/api/workflow-nodes/{node_id}", json={"title": "A 改名"}).status_code == 200
+
+    edges = workflow.get("edges") or []
+    if edges:
+        assert bob.delete(f"/api/workflow-edges/{edges[0]['id']}").status_code == 404
+
+
+def test_workflow_guards_do_not_break_normal_use(isolation_env: None, configured_env: Path, db_session) -> None:
+    """守卫不得误伤：A 对自己的商品可完整走一遍工作流读写。"""
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    alice, _ = _make_user_client(app, db_session, "wf_solo")
+
+    created = alice.post(
+        "/api/products", data={"name": "自用商品"}, files={"image": ("m.png", _png(), "image/png")}
+    )
+    product_id = created.json()["id"]
+
+    assert alice.get(f"/api/products/{product_id}/workflow").status_code == 200
+    node = alice.post(
+        f"/api/products/{product_id}/workflow/nodes",
+        json={"node_type": "copy_generation", "title": "自用节点", "position_x": 120, "position_y": 80},
+    )
+    assert node.status_code in {200, 201}, node.text
+    assert alice.get(f"/api/products/{product_id}/workflow/status").status_code == 200

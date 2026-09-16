@@ -51,7 +51,22 @@ def latest_workflow_runs(workflow: ProductWorkflow, limit: int = 10) -> list[Wor
     return _latest_workflow_runs(workflow, limit=limit)
 
 
-def get_product_workflow_status(session, product_id: str) -> ProductWorkflowStatusSnapshot:
+def get_product_workflow_status(
+    session, product_id: str, owner_id: str | None = None
+) -> ProductWorkflowStatusSnapshot:
+    """商品工作流状态快照；owner_id 非 None 时先做归属判定（审计 S0-02）。
+
+    跨用户查询与"不存在"同文案，避免用状态接口探测他人商品是否存在。
+    """
+    if owner_id is not None:
+        from productflow_backend.application.isolation import ensure_row_readable
+        from productflow_backend.domain.errors import NotFoundError
+        from productflow_backend.infrastructure.db.models import Product
+
+        product = session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("商品不存在")
+        ensure_row_readable(product, owner_id, message="商品不存在")
     return _get_active_workflow_status(session, product_id)
 
 

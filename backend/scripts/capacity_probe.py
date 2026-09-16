@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
-import statistics
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -58,7 +58,16 @@ def _timed(client: httpx.Client, method: str, url: str, *, label: str, sample: S
 def main() -> int:
     parser = argparse.ArgumentParser(description="ProductFlow 本机容量探针")
     parser.add_argument("--base-url", required=True)
-    parser.add_argument("--admin-key", required=True, help="管理员密钥（用于建探针账号）")
+    parser.add_argument(
+        "--probe-username",
+        default=os.getenv("CAPACITY_PROBE_USERNAME", "capacity-probe"),
+        help="探针账号用户名（默认取环境变量 CAPACITY_PROBE_USERNAME）",
+    )
+    parser.add_argument(
+        "--probe-password",
+        default=os.getenv("CAPACITY_PROBE_PASSWORD", ""),
+        help="探针账号密码；必须由环境变量 CAPACITY_PROBE_PASSWORD 提供，脚本内不留明文",
+    )
     parser.add_argument("--users", type=int, default=5)
     parser.add_argument("--sessions-per-user", type=int, default=200)
     parser.add_argument("--messages-per-session", type=int, default=50)
@@ -73,11 +82,15 @@ def main() -> int:
 
     with httpx.Client(base_url=args.base_url, timeout=120.0, headers=CSRF) as client:
         # 探针用户（通过 CLI 之外的路径创建：直接用邀请兑换，避免依赖容器内 shell）
-        login = client.post("/api/auth/user/login", json={"username": "capacity-probe", "password": "probe-200467"})
+        if not args.probe_password:
+            print("  缺少探针账号密码：请通过环境变量 CAPACITY_PROBE_PASSWORD 提供（脚本内不保存明文）")
+            return 2
+        login = client.post(
+            "/api/auth/user/login",
+            json={"username": args.probe_username, "password": args.probe_password},
+        )
         if login.status_code != 200:
-            print("  探针账号不存在，请先在实例内创建：")
-            print("    docker compose exec productflow-backend python -m productflow_backend.initialization \\")
-            print("      create-admin --username capacity-probe --password probe-200467")
+            print(f"  探针账号 {args.probe_username} 登录失败（{login.status_code}）——请先在实例上创建该账号")
             return 2
 
         sessions_sample = Sample("会话列表")
