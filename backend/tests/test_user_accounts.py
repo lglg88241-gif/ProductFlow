@@ -27,6 +27,16 @@ from productflow_backend.application.user_accounts import (
 CSRF_HEADERS = {"X-Requested-With": "productflow"}
 
 
+def _png(width: int = 200, height: int = 200) -> bytes:
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), (70, 110, 160)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # 密码与令牌
 # ---------------------------------------------------------------------------
@@ -52,14 +62,53 @@ def test_generate_token_is_unique_and_hashed(configured_env: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def admin_client(configured_env: Path) -> TestClient:
-    from helpers import _login
+def _make_member(app, db, username: str):
+    """建 member 账号 + 服务端会话，返回带 cookie 的客户端与 user_id。"""
+    return _make_user_with_role(app, db, username, "member")
 
+
+def _make_admin(app, db, username: str):
+    return _make_user_with_role(app, db, username, "admin")
+
+
+def _make_user_with_role(app, db, username: str, role: str):
+    from datetime import timedelta
+
+    from productflow_backend.application.time import now_utc
+    from productflow_backend.application.user_accounts import create_user, hash_token
+    from productflow_backend.infrastructure.db.models import UserSession
+    from productflow_backend.presentation.deps import USER_SESSION_COOKIE
+
+    user = create_user(db, username=username, password="user-pass-123", role=role)
+    plaintext = f"tok-{username}"
+    now = now_utc()
+    db.add(
+        UserSession(
+            user_id=user.id,
+            token_hash=hash_token(plaintext),
+            created_at=now,
+            last_seen_at=now,
+            absolute_expires_at=now + timedelta(days=7),
+            idle_expires_at=now + timedelta(days=1),
+        )
+    )
+    db.commit()
+    client = TestClient(app)
+    client.cookies.set(USER_SESSION_COOKIE, plaintext)
+    return client, str(user.id)
+
+
+@pytest.fixture()
+def admin_client(configured_env: Path, db_session) -> TestClient:
+    """邀请管理现在要求**管理员账号会话**（复审 P1）。
+
+    旧的共享管理员口令不再能管理账号（否则门禁一关就匿名可管理邀请），
+    因此夹具改为：建 admin 账号 + 服务端会话。
+    """
     from productflow_backend.presentation.api import create_app
 
-    client = TestClient(create_app())
-    _login(client)
+    app = create_app()
+    client, _ = _make_user_with_role(app, db_session, "fixture-admin", "admin")
     return client
 
 
@@ -195,10 +244,10 @@ def test_disable_user_kills_sessions(admin_client: TestClient, db_session) -> No
 def test_admin_can_list_and_revoke_but_member_cannot(admin_client: TestClient) -> None:
     user = _redeem(admin_client, username="plain-member")
 
-    # 普通成员不能管理邀请
-    assert user.get("/api/auth/invites").status_code == 401
+    # 普通成员不能管理邀请：已登录但非 admin → 403（匿名才是 401）
+    assert user.get("/api/auth/invites").status_code == 403
     assert (
-        user.post("/api/auth/invites", json={}, headers=CSRF_HEADERS).status_code == 401
+        user.post("/api/auth/invites", json={}, headers=CSRF_HEADERS).status_code == 403
     )
 
 
@@ -264,3 +313,73 @@ def test_csrf_allows_same_origin_with_port_normalization(admin_client: TestClien
         headers={"X-Requested-With": "productflow", "Origin": "http://evil.example.com"},
     )
     assert blocked.status_code == 403, "跨站 Origin 必须被拒"
+
+
+# ---------------------------------------------------------------------------
+# 复审 P1：管理接口不得因旧门禁关闭而匿名开放；业务接口不得被旧门禁拦
+# ---------------------------------------------------------------------------
+
+
+def test_invite_management_requires_admin_account_even_when_legacy_gate_off(
+    isolation_env, configured_env: Path
+) -> None:
+    """复现并锁死：旧门禁关闭时，匿名客户端不得管理邀请（此前返回 201 并给出明文 token）。"""
+    from productflow_backend.config import get_settings
+    from productflow_backend.presentation.api import create_app
+
+    get_settings.cache_clear()
+    try:
+        app = create_app()
+        anonymous = TestClient(app)
+        headers = {"X-Requested-With": "productflow"}
+
+        assert anonymous.post("/api/auth/invites", json={"note": "probe"}, headers=headers).status_code == 401
+        assert anonymous.get("/api/auth/invites").status_code == 401
+        assert anonymous.delete("/api/auth/invites/some-id", headers=headers).status_code == 401
+        # 诊断端点同样不得匿名可读（暴露供应商与拓扑）
+        assert anonymous.get("/api/admin/diagnostics").status_code == 401
+    finally:
+        get_settings.cache_clear()
+
+
+def test_member_cannot_manage_invites_but_admin_can(
+    isolation_env, configured_env: Path, db_session
+) -> None:
+    """权限矩阵：member → 403（无管理权）；admin → 可管理。"""
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    member, _ = _make_member(app, db_session, "invite_member")
+    headers = {"X-Requested-With": "productflow"}
+
+    assert member.post("/api/auth/invites", json={}, headers=headers).status_code == 403
+    assert member.get("/api/auth/invites").status_code == 403
+
+    admin, _ = _make_admin(app, db_session, "invite_admin")
+    assert admin.get("/api/auth/invites").status_code == 200
+    created = admin.post("/api/auth/invites", json={"note": "admin 创建"}, headers=headers)
+    assert created.status_code == 201
+    assert created.json().get("token"), "管理员创建邀请应返回一次性 token"
+
+
+def test_member_can_use_own_workflow_without_legacy_admin_credentials(
+    isolation_env, configured_env: Path, db_session
+) -> None:
+    """复审 P1 第三条：member 登录后应能用**自己的工作流**，不需要共享管理员口令。
+
+    此前工作流路由同时挂旧 require_admin，而用户登录不设置旧门禁的
+    request.session.is_authenticated，导致 member 读自己的工作流得到 401。
+    """
+    from productflow_backend.presentation.api import create_app
+
+    app = create_app()
+    member, _ = _make_member(app, db_session, "wf_member")
+
+    created = member.post(
+        "/api/products", data={"name": "member 的商品"}, files={"image": ("m.png", _png(), "image/png")}
+    )
+    assert created.status_code == 201, created.text
+    product_id = created.json()["id"]
+
+    assert member.get(f"/api/products/{product_id}/workflow").status_code == 200
+    assert member.get(f"/api/products/{product_id}/workflow/status").status_code == 200

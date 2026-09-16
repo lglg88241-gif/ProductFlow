@@ -23,11 +23,11 @@ from productflow_backend.infrastructure.provider_config import (
     resolve_agent_provider_config,
     resolve_image_provider_config,
 )
-from productflow_backend.presentation.deps import get_session, require_admin
+from productflow_backend.presentation.deps import get_session, require_account_admin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin", tags=["admin-diagnostics"], dependencies=[Depends(require_admin)])
+router = APIRouter(prefix="/api/admin", tags=["admin-diagnostics"], dependencies=[Depends(require_account_admin)])
 
 _REDIS_PROBE_TIMEOUT_SECONDS = 2.0
 

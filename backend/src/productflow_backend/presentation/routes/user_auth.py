@@ -35,7 +35,7 @@ from productflow_backend.application.user_accounts import (
 )
 from productflow_backend.config import get_settings
 from productflow_backend.infrastructure.db.models import UserInvite
-from productflow_backend.presentation.deps import get_session, require_admin
+from productflow_backend.presentation.deps import get_session, require_account_admin
 from productflow_backend.presentation.rate_limit import (
     client_ip,
     user_login_entry_rate_limiter,
@@ -140,7 +140,7 @@ def _invite_created_response(invite: UserInvite, token: str) -> InviteCreatedRes
     "/invites",
     response_model=InviteCreatedResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_account_admin)],
 )
 def create_user_invite(payload: InviteCreateRequest, request: Request, session: Session = Depends(get_session)):
     _enforce_csrf(request)
@@ -150,7 +150,7 @@ def create_user_invite(payload: InviteCreateRequest, request: Request, session: 
     return _invite_created_response(invite, token)
 
 
-@router.get("/invites", response_model=InviteListResponse, dependencies=[Depends(require_admin)])
+@router.get("/invites", response_model=InviteListResponse, dependencies=[Depends(require_account_admin)])
 def list_user_invites(session: Session = Depends(get_session)):
     invites = list_invites(session)
     return InviteListResponse(
@@ -170,7 +170,11 @@ def list_user_invites(session: Session = Depends(get_session)):
     )
 
 
-@router.delete("/invites/{invite_id}", response_model=InviteRevokeResponse, dependencies=[Depends(require_admin)])
+@router.delete(
+    "/invites/{invite_id}",
+    response_model=InviteRevokeResponse,
+    dependencies=[Depends(require_account_admin)],
+)
 def revoke_user_invite(invite_id: str, request: Request, session: Session = Depends(get_session)):
     _enforce_csrf(request)
     try:
