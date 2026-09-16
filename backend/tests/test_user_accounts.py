@@ -237,3 +237,30 @@ def test_migrated_business_rows_are_untouched(configured_env: Path, db_session) 
 
     assert not orphan_products and not orphan_sessions, "回填之前不允许有任何 owner 被设置"
     _ = products_before, sessions_before
+
+
+def test_csrf_allows_same_origin_with_port_normalization(admin_client: TestClient) -> None:
+    """回归：反代归一化端口后，同源请求不得被 CSRF 防线误杀。
+
+    真实缺陷：nginx `$host` 会剥掉端口（浏览器发 Origin: http://h:29281、
+    Host 变成 h），严格比对 netloc 会 403 —— 表现为"浏览器里根本登不进去"。
+    同源判定按主机名比较，忽略端口。
+    """
+    from productflow_backend.presentation.api import create_app
+
+    client = TestClient(admin_client.app)
+    # 同主机名、Host 无端口（模拟 nginx $host 行为）
+    ok = client.post(
+        "/api/auth/user/login",
+        json={"username": "nobody-xyz", "password": "whatever-123"},
+        headers={"X-Requested-With": "productflow", "Origin": "http://testserver:29281"},
+    )
+    assert ok.status_code == 401, f"同源请求应进入凭据校验（401），而非 CSRF 拒绝：{ok.status_code} {ok.text}"
+
+    # 真正跨站（主机名不同）仍必须 403
+    blocked = TestClient(create_app()).post(
+        "/api/auth/user/login",
+        json={"username": "nobody-xyz", "password": "whatever-123"},
+        headers={"X-Requested-With": "productflow", "Origin": "http://evil.example.com"},
+    )
+    assert blocked.status_code == 403, "跨站 Origin 必须被拒"

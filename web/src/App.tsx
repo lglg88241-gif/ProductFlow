@@ -13,6 +13,9 @@ const GalleryPage = lazy(() =>
 const HelpPage = lazy(() =>
   import("./pages/HelpPage").then((module) => ({ default: module.HelpPage })),
 );
+const InvitePage = lazy(() =>
+  import("./pages/InvitePage").then((m) => ({ default: m.InvitePage })),
+);
 const LoginPage = lazy(() =>
   import("./pages/LoginPage").then((module) => ({ default: module.LoginPage })),
 );
@@ -84,6 +87,7 @@ function AppRoutes() {
           path="/login"
           element={<LoginPage authenticated={authenticated} dataIsolationEnabled={dataIsolationEnabled} />}
         />
+        <Route path="/invite/:token" element={<InvitePage />} />
         <Route
           path="/products"
           element={authenticated ? <ProductListPage /> : <Navigate to="/login" replace />}

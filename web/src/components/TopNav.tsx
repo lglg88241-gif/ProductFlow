@@ -215,6 +215,17 @@ export function TopNav({ breadcrumbs, onHome, onLogout }: TopNavProps) {
             >
               <CurrentThemeIcon size={16} />
             </button>
+            {isolationUser ? (
+              <button
+                type="button"
+                onClick={() => userLogoutMutation.mutate()}
+                aria-label={`${t("nav.logout")}（${isolationUser.username}）`}
+                title={`${t("nav.currentUser")}：${isolationUser.display_name || isolationUser.username}`}
+                className="inline-flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-600 shadow-sm transition-colors active:scale-[0.98] hover:border-indigo-200 hover:text-indigo-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 dark:border-slate-700 dark:bg-slate-950/80 dark:text-slate-300 dark:hover:border-violet-400/55 dark:hover:text-violet-100"
+              >
+                <LogOut size={16} />
+              </button>
+            ) : null}
           </div>
         </div>
 

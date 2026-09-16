@@ -70,20 +70,27 @@ def _enforce_csrf(request: Request) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=CSRF_FAILURE_DETAIL)
     origin = request.headers.get("origin")
     if origin is not None:
-        host = (request.headers.get("host") or "").strip().lower()
-        if not host or _origin_netloc(origin) != host:
+        origin_host = _origin_host(origin)
+        request_host = _request_host(request)
+        if not origin_host or not request_host or origin_host != request_host:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=CSRF_FAILURE_DETAIL)
 
 
-def _origin_netloc(origin: str) -> str:
-    """取 Origin 的 host[:port]，显式默认端口视为同源。"""
-    parsed = urlparse(origin)
-    netloc = parsed.netloc.strip().lower()
-    if parsed.scheme == "https" and netloc.endswith(":443"):
-        netloc = netloc[: -len(":443")]
-    elif parsed.scheme == "http" and netloc.endswith(":80"):
-        netloc = netloc[: -len(":80")]
-    return netloc
+def _origin_host(origin: str) -> str:
+    """取 Origin 的主机名（忽略端口）。
+
+    为什么忽略端口：反向代理常归一化 Host（nginx `$host` 会剥掉端口、CDN 亦同），
+    端口不一致不代表跨站。同一主机名 + 浏览器无法伪造 Host 头，足以挡住跨站表单提交。
+    """
+    return (urlparse(origin).hostname or "").strip().lower()
+
+
+def _request_host(request: Request) -> str:
+    """取请求 Host 的主机名（同样忽略端口）。"""
+    host = (request.headers.get("host") or "").strip().lower()
+    if host.startswith("["):  # IPv6 字面量： [::1]:8080
+        return host.split("]")[0].lstrip("[")
+    return host.split(":")[0]
 
 
 def _set_session_cookie(response: Response, token: str) -> None:

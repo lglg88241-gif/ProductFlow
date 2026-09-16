@@ -120,6 +120,13 @@ export const api = {
   getMe(): Promise<AuthUser> {
     return request<AuthUser>("/api/auth/user/me");
   },
+  /** 用一次性邀请兑换账号（自助设置用户名与密码）；成功即建立用户会话 */
+  redeemInvite(token: string, username: string, password: string): Promise<AuthUser> {
+    return request<AuthUser>("/api/auth/invite/redeem", {
+      method: "POST",
+      body: JSON.stringify({ token, username, password }),
+    });
+  },
   userLogin(username: string, password: string): Promise<AuthUser> {
     return request("/api/auth/user/login", {
       method: "POST",
