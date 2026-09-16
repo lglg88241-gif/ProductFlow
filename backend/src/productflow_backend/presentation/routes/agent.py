@@ -27,11 +27,21 @@ from productflow_backend.application.designer_agent.loop import (
     run_agent_turn,
     run_agent_turn_events,
 )
+from productflow_backend.application.isolation import (
+    current_owner_id,
+    ensure_row_readable,
+    owner_filter_expression,
+)
 from productflow_backend.domain.errors import BusinessError
-from productflow_backend.infrastructure.db.models import CopyReport
+from productflow_backend.infrastructure.db.models import CopyReport, UserAccount
 from productflow_backend.infrastructure.logging import get_request_id
 from productflow_backend.infrastructure.safe_errors import classify_error
-from productflow_backend.presentation.deps import get_session, require_admin, require_deletion_enabled
+from productflow_backend.presentation.deps import (
+    get_session,
+    require_admin,
+    require_business_user,
+    require_deletion_enabled,
+)
 from productflow_backend.presentation.image_variants import serve_image_variant
 from productflow_backend.presentation.schemas.agent import (
     AgentMessageResponse,
@@ -134,24 +144,33 @@ def _serialize_detail(agent_session) -> AgentSessionDetailResponse:
 
 
 @router.get("/sessions", response_model=AgentSessionListResponse)
-def list_agent_sessions_endpoint(session: Session = Depends(get_session)) -> AgentSessionListResponse:
-    return AgentSessionListResponse(items=[_serialize_session(item) for item in list_agent_sessions(session)])
+def list_agent_sessions_endpoint(
+    session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
+) -> AgentSessionListResponse:
+    return AgentSessionListResponse(
+        items=[_serialize_session(item) for item in list_agent_sessions(session, owner_id=current_owner_id(user))]
+    )
 
 
 @router.post("/sessions", response_model=AgentSessionResponse, status_code=status.HTTP_201_CREATED)
 def create_agent_session_endpoint(
     payload: AgentSessionCreateRequest,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> AgentSessionResponse:
-    return _serialize_session(create_agent_session(session, title=payload.title))
+    return _serialize_session(
+        create_agent_session(session, title=payload.title, owner_id=current_owner_id(user))
+    )
 
 
 @router.get("/sessions/{agent_session_id}", response_model=AgentSessionDetailResponse)
 def get_agent_session_endpoint(
     agent_session_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> AgentSessionDetailResponse:
-    return _serialize_detail(get_agent_session(session, agent_session_id))
+    return _serialize_detail(get_agent_session(session, agent_session_id, current_owner_id(user)))
 
 
 @router.delete(
@@ -159,8 +178,12 @@ def get_agent_session_endpoint(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require_deletion_enabled)],
 )
-def delete_agent_session_endpoint(agent_session_id: str, session: Session = Depends(get_session)) -> None:
-    delete_agent_session(session, agent_session_id)
+def delete_agent_session_endpoint(
+    agent_session_id: str,
+    session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
+) -> None:
+    delete_agent_session(session, agent_session_id, current_owner_id(user))
 
 
 def _serialize_asset(entry) -> dict:
@@ -185,10 +208,16 @@ def _serialize_asset(entry) -> dict:
 def list_agent_assets_endpoint(
     kind: str | None = None,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> dict:
     if kind and kind not in ASSET_KINDS:
         raise HTTPException(status_code=400, detail=f"素材类型不支持: {kind}")
-    return {"items": [_serialize_asset(entry) for entry in list_asset_entries(session, kind=kind)]}
+    return {
+        "items": [
+            _serialize_asset(entry)
+            for entry in list_asset_entries(session, kind=kind, owner_id=current_owner_id(user))
+        ]
+    }
 
 
 @router.post("/assets", status_code=status.HTTP_201_CREATED)
@@ -197,8 +226,11 @@ async def upload_agent_asset_endpoint(
     kind: str = Form(default="template"),
     agent_session_id: str | None = Form(default=None),
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> dict:
     from productflow_backend.presentation.upload_validation import read_validated_image_upload
+
+    owner_id = current_owner_id(user)
 
     try:
         validated = await read_validated_image_upload(file, fallback_filename="asset.bin")
@@ -208,6 +240,7 @@ async def upload_agent_asset_endpoint(
             filename=validated.filename,
             content=validated.content,
             agent_session_id=agent_session_id,
+            owner_id=owner_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -252,8 +285,9 @@ def download_agent_asset_endpoint(
     asset_id: str,
     variant: str = "original",
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ):
-    entry = get_asset_entry(session, asset_id)
+    entry = get_asset_entry(session, asset_id, current_owner_id(user))
     try:
         return serve_image_variant(
             storage_path=entry.storage_path,
@@ -272,6 +306,7 @@ async def export_asset_grid_endpoint(
     grid: str = "3x3",
     fmt: str = "png",
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ):
     """把素材切成朋友圈分格切片（zip 下载）。
 
@@ -283,7 +318,7 @@ async def export_asset_grid_endpoint(
     from productflow_backend.application.grid_export import slice_into_grid
     from productflow_backend.infrastructure.storage import LocalStorage
 
-    entry = get_asset_entry(session, asset_id)
+    entry = get_asset_entry(session, asset_id, current_owner_id(user))
     storage = LocalStorage()
     try:
         raw = await run_in_threadpool(lambda: storage.resolve(entry.storage_path).read_bytes())
@@ -306,7 +341,13 @@ async def export_asset_grid_endpoint(
     status_code=status.HTTP_204_NO_CONTENT,
     dependencies=[Depends(require_deletion_enabled)],
 )
-def delete_agent_asset_endpoint(asset_id: str, session: Session = Depends(get_session)) -> None:
+def delete_agent_asset_endpoint(
+    asset_id: str,
+    session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
+) -> None:
+    # 归属判定先于删除：跨用户删除与"不存在"同文案（内置模板仍由既有逻辑拒绝）
+    get_asset_entry(session, asset_id, current_owner_id(user))
     delete_asset_entry(session, asset_id)
 
 
@@ -332,11 +373,15 @@ def _copy_report_filename(report: CopyReport) -> str:
 def list_agent_copy_reports_endpoint(
     session_id: str | None = None,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> dict:
-    """按会话过滤列出文案报告（可选 session_id）。"""
+    """按会话过滤列出文案报告（可选 session_id）；隔离开启时只看自己的。"""
     query = select(CopyReport).order_by(CopyReport.created_at.desc(), CopyReport.id)
     if session_id:
         query = query.where(CopyReport.agent_session_id == session_id)
+    owner_clause = owner_filter_expression(CopyReport.owner_id, current_owner_id(user))
+    if owner_clause is not None:
+        query = query.where(owner_clause)
     reports = list(session.scalars(query).all())
     return {
         "items": [
@@ -356,11 +401,13 @@ def list_agent_copy_reports_endpoint(
 def download_agent_copy_report_endpoint(
     report_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> Response:
-    """下载文案报告 markdown 附件。"""
+    """下载文案报告 markdown 附件；跨用户下载与"不存在"同文案。"""
     report = session.get(CopyReport, report_id)
     if report is None:
         raise HTTPException(status_code=404, detail="文案报告不存在")
+    ensure_row_readable(report, current_owner_id(user), message="文案报告不存在")
     return Response(
         content=report.content_md or "",
         media_type="text/markdown; charset=utf-8",

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from productflow_backend.application.designer_agent.llm import AgentLLMClient, AgentLLMError, build_agent_llm_client
 from productflow_backend.application.designer_agent.prompts import AGENT_SYSTEM_PROMPT, DEFAULT_STAGE, STAGE_BY_TOOL
 from productflow_backend.application.designer_agent.tools import execute_tool, tool_schemas
+from productflow_backend.application.isolation import ensure_row_readable, owner_filter_expression
 from productflow_backend.domain.errors import NotFoundError
 from productflow_backend.infrastructure.db.models import AgentMessage, AgentSession
 
@@ -62,22 +63,28 @@ class AgentTurnResult:
     pending_generation_tasks: list[dict[str, Any]] = field(default_factory=list)
 
 
-def create_agent_session(db: Session, *, title: str | None = None) -> AgentSession:
+def create_agent_session(
+    db: Session, *, title: str | None = None, owner_id: str | None = None
+) -> AgentSession:
     normalized = (title or "").strip() or _DEFAULT_SESSION_TITLE
-    agent_session = AgentSession(title=normalized[:120], stage=DEFAULT_STAGE)
+    agent_session = AgentSession(title=normalized[:120], stage=DEFAULT_STAGE, owner_id=owner_id)
     db.add(agent_session)
     db.commit()
     db.refresh(agent_session)
     return agent_session
 
 
-def list_agent_sessions(db: Session) -> list[AgentSession]:
-    return list(
-        db.scalars(select(AgentSession).order_by(AgentSession.updated_at.desc(), AgentSession.id)).all()
-    )
+def list_agent_sessions(db: Session, owner_id: str | None = None) -> list[AgentSession]:
+    """列出会话；owner_id 非 None（隔离开启）时只返回自己的 + 全局可读的。"""
+    statement = select(AgentSession).order_by(AgentSession.updated_at.desc(), AgentSession.id)
+    owner_clause = owner_filter_expression(AgentSession.owner_id, owner_id)
+    if owner_clause is not None:
+        statement = statement.where(owner_clause)
+    return list(db.scalars(statement).all())
 
 
-def get_agent_session(db: Session, agent_session_id: str) -> AgentSession:
+def get_agent_session(db: Session, agent_session_id: str, owner_id: str | None = None) -> AgentSession:
+    """取会话并做归属判定：跨用户访问与"不存在"同文案（不泄漏存在性）。"""
     agent_session = db.scalar(
         select(AgentSession)
         .options(selectinload(AgentSession.messages))
@@ -85,13 +92,15 @@ def get_agent_session(db: Session, agent_session_id: str) -> AgentSession:
     )
     if agent_session is None:
         raise NotFoundError("设计师会话不存在")
+    ensure_row_readable(agent_session, owner_id, message="设计师会话不存在")
     return agent_session
 
 
-def delete_agent_session(db: Session, agent_session_id: str) -> None:
+def delete_agent_session(db: Session, agent_session_id: str, owner_id: str | None = None) -> None:
     agent_session = db.get(AgentSession, agent_session_id)
     if agent_session is None:
         raise NotFoundError("设计师会话不存在")
+    ensure_row_readable(agent_session, owner_id, message="设计师会话不存在")
     db.delete(agent_session)
     db.commit()
 

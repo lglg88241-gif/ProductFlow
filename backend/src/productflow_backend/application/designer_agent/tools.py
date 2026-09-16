@@ -56,7 +56,10 @@ def _ensure_agent_image_session(db: Session, agent_session: AgentSession) -> str
     """每个 Agent 会话绑定一个图片会话，产出资产全部落在里面。"""
     if agent_session.image_session_id:
         return agent_session.image_session_id
-    image_session = create_image_session(db, title=f"设计师·{agent_session.title}")
+    # 归属沿父级会话继承：图片会话是 agent 会话的子资源
+    image_session = create_image_session(
+        db, title=f"设计师·{agent_session.title}", owner_id=agent_session.owner_id
+    )
     agent_session.image_session_id = image_session.id
     db.commit()
     return image_session.id
@@ -173,6 +176,7 @@ def _run_save_asset(ctx: ToolContext) -> dict[str, Any]:
         title=str(arguments.get("title") or f"会话产出 {asset.id[:8]}"),
         agent_session_id=agent_session.id,
         image_session_id=image_session_id,
+        owner_id=agent_session.owner_id,
     )
     _auto_tag_entry(db, entry, ctx.llm)
     return {"status": "completed", "message": "已存入素材库。", **_asset_summary(entry)}
@@ -700,6 +704,8 @@ def _run_write_copy_report(
         agent_session_id=agent_session.id,
         title=title[:255],
         content_md=content_md,
+        # 归属沿会话继承：漏设会让报告落成 NULL=全局可读，构成跨用户下载漏洞
+        owner_id=agent_session.owner_id,
     )
     db.add(report)
     db.commit()

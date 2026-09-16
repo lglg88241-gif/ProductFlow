@@ -10,6 +10,7 @@ from sqlalchemy import String, cast, or_, select
 from sqlalchemy.orm import Session
 
 from productflow_backend.application.designer_agent.llm import AgentLLMClient, AgentLLMError
+from productflow_backend.application.isolation import ensure_row_readable, owner_filter_expression
 from productflow_backend.domain.errors import BusinessError, NotFoundError
 from productflow_backend.infrastructure.db.models import AssetLibraryEntry
 from productflow_backend.infrastructure.db.session import get_session_factory
@@ -41,8 +42,9 @@ def register_asset_upload(
     agent_session_id: str | None = None,
     image_session_id: str | None = None,
     title: str | None = None,
+    owner_id: str | None = None,
 ) -> AssetLibraryEntry:
-    """校验并把上传图存入素材库；视觉标注由 analyze_asset 补充。"""
+    """校验并把上传图存入素材库；视觉标注由 analyze_asset 补充。owner_id 为隔离归属。"""
     if kind not in ASSET_KINDS:
         raise BusinessError(f"素材类型不支持: {kind}")
     if not content:
@@ -72,6 +74,7 @@ def register_asset_upload(
         height=height,
         agent_session_id=agent_session_id,
         image_session_id=image_session_id,
+        owner_id=owner_id,
     )
     db.add(entry)
     db.commit()
@@ -87,6 +90,7 @@ def register_generated_asset(
     title: str,
     agent_session_id: str | None = None,
     image_session_id: str | None = None,
+    owner_id: str | None = None,
 ) -> AssetLibraryEntry:
     storage = LocalStorage()
     suffix = ".png" if mime_type == "image/png" else ".jpg"
@@ -99,6 +103,7 @@ def register_generated_asset(
         mime_type=mime_type,
         agent_session_id=agent_session_id,
         image_session_id=image_session_id,
+        owner_id=owner_id,
     )
     db.add(entry)
     db.commit()
@@ -140,17 +145,24 @@ def analyze_asset(db: Session, entry: AssetLibraryEntry, llm: AgentLLMClient) ->
     return entry
 
 
-def list_asset_entries(db: Session, *, kind: str | None = None) -> list[AssetLibraryEntry]:
+def list_asset_entries(
+    db: Session, *, kind: str | None = None, owner_id: str | None = None
+) -> list[AssetLibraryEntry]:
     statement = select(AssetLibraryEntry).order_by(AssetLibraryEntry.created_at.desc(), AssetLibraryEntry.id)
     if kind:
         statement = statement.where(AssetLibraryEntry.kind == kind)
+    owner_clause = owner_filter_expression(AssetLibraryEntry.owner_id, owner_id)
+    if owner_clause is not None:
+        statement = statement.where(owner_clause)
     return list(db.scalars(statement).all())
 
 
-def get_asset_entry(db: Session, asset_id: str) -> AssetLibraryEntry:
+def get_asset_entry(db: Session, asset_id: str, owner_id: str | None = None) -> AssetLibraryEntry:
+    """取素材并做归属判定：跨用户读取与"不存在"同文案（内置模板 NULL 全体可读）。"""
     entry = db.get(AssetLibraryEntry, asset_id)
     if entry is None:
         raise NotFoundError("素材不存在")
+    ensure_row_readable(entry, owner_id, message="素材不存在")
     return entry
 
 
@@ -175,7 +187,7 @@ def _asset_search_prefilter(tokens: list[str]):
 
 
 def search_asset_entries(
-    db: Session, query: str, *, kind: str | None = None, limit: int = 5
+    db: Session, query: str, *, kind: str | None = None, limit: int = 5, owner_id: str | None = None
 ) -> list[AssetLibraryEntry]:
     """轻量语义检索：对标题/标签/模板档案做词项匹配打分（M3 再升级向量检索）。
 
@@ -192,6 +204,9 @@ def search_asset_entries(
     )
     if kind:
         statement = statement.where(AssetLibraryEntry.kind == kind)
+    owner_clause = owner_filter_expression(AssetLibraryEntry.owner_id, owner_id)
+    if owner_clause is not None:
+        statement = statement.where(owner_clause)
     scored: list[tuple[int, AssetLibraryEntry]] = []
     for entry in list(db.scalars(statement).all()):
         profile_text = json.dumps(entry.template_profile_json or {}, ensure_ascii=False)
