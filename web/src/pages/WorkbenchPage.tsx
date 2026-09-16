@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Paperclip, Plus, Send } from "lucide-react";
 
@@ -7,6 +7,7 @@ import { MultiCandidateCard, shouldRenderMultiCandidates } from "../components/M
 import { PosterRerenderCard } from "../components/PosterRerenderCard";
 import { TopNav } from "../components/TopNav";
 import { api, ApiError } from "../lib/api";
+import { buildTimeline } from "../lib/agentTimeline";
 import { shouldSubmitOnEnter } from "../lib/composerKeys";
 import type {
   AgentAssetEntry,
@@ -228,6 +229,12 @@ export function WorkbenchPage() {
     refetchInterval: 5000,
   });
 
+  const historyTimeline = useMemo(() => buildTimeline(detail?.messages ?? []), [detail]);
+  const hasHistoryContent = useMemo(
+    () => historyTimeline.some((item) => item.kind === "tool" || item.message.role === "user"),
+    [historyTimeline],
+  );
+
   const pendingTasks = imageSessionQuery.data?.generation_tasks?.filter(
     (task) => task.status === "queued" || task.status === "running",
   );
@@ -239,7 +246,15 @@ export function WorkbenchPage() {
   const [streamError, setStreamError] = useState<string | null>(null);
 
   // pending 候选卡的有界轮询：仅在流式会话进行中轮询，按 image_session_id 去重共享结果
-  const candidatePolls = useCandidatePolls(streaming ? streamToolEvents : []);
+  // 输入 = 流式事件 ∪ 历史工具事件：刷新页面后仍在生成的候选也要继续轮询（审计 E）
+  const pollFeed = useMemo(
+    () => [
+      ...(streaming ? streamToolEvents : []),
+      ...historyTimeline.filter((item) => item.kind === "tool").map((item) => item.event),
+    ],
+    [streaming, streamToolEvents, historyTimeline],
+  );
+  const candidatePolls = useCandidatePolls(pollFeed);
 
   const resetStreamState = () => {
     setStreamStage(null);
@@ -383,24 +398,39 @@ export function WorkbenchPage() {
           </header>
 
           <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
-            {(detail?.messages ?? [])
-              .filter((message) => message.role !== "tool")
-              .map((message) => (
+            {historyTimeline.map((item) =>
+              item.kind === "tool" ? (
+                <div key={item.key} className="flex justify-start">
+                  <div className="w-full max-w-[90%]">
+                    <ToolEventCard
+                      event={item.event}
+                      poll={
+                        item.event.result?.image_session_id
+                          ? candidatePolls[item.event.result.image_session_id]
+                          : undefined
+                      }
+                      onPick={(message: string) => void sendAgentMessage(message)}
+                      onContinue={(message: string) => setDraft(message)}
+                    />
+                  </div>
+                </div>
+              ) : (
                 <div
-                  key={message.id}
-                  className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
+                  key={item.key}
+                  className={`flex ${item.message.role === "user" ? "justify-end" : "justify-start"}`}
                 >
                   <div
                     className={`max-w-[80%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ${
-                      message.role === "user"
+                      item.message.role === "user"
                         ? "bg-slate-900 text-white"
                         : "border border-slate-200 bg-white text-slate-800"
                     }`}
                   >
-                    {message.content}
+                    {item.message.content}
                   </div>
                 </div>
-              ))}
+              ),
+            )}
             {(streamMessages ?? []).map((message) => (
               <div
                 key={`stream-${message.id}`}
@@ -482,7 +512,7 @@ export function WorkbenchPage() {
                 ) : null}
               </div>
             ) : null}
-            {detail && detail.messages.filter((message) => message.role === "user").length === 0 ? (
+            {detail && !hasHistoryContent ? (
               <p className="py-10 text-center text-sm text-slate-400">{t("workbench.emptyHint")}</p>
             ) : null}
           </div>
