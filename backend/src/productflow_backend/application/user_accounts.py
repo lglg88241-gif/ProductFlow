@@ -31,7 +31,8 @@ from productflow_backend.infrastructure.db.models import UserAccount, UserInvite
 SESSION_IDLE_LIFETIME = timedelta(hours=24)
 SESSION_ABSOLUTE_LIFETIME = timedelta(days=7)
 INVITE_DEFAULT_TTL = timedelta(hours=24)
-MIN_PASSWORD_LENGTH = 8
+# 产品决定（2026-09-16）：本地验收场景密码最低 6 位
+MIN_PASSWORD_LENGTH = 6
 MAX_USERNAME_LENGTH = 64
 ROLES = ("admin", "member")
 DEFAULT_ROLE = "member"
