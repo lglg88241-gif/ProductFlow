@@ -64,19 +64,22 @@ function detailWith(
 const formatLabel = (index: number) => `候选 ${index}`;
 
 describe("collectPendingImageSessionIds", () => {
-  it("收集 pending 且带 image_session_id 的 generate_image 事件，去重保序", () => {
+  it("按结果形状收集 pending 任务（不限工具名），去重保序", () => {
     const events: AgentToolEvent[] = [
       toolEvent("generate_image", pendingResult("s1")),
       toolEvent("generate_image", pendingResult("s1")),
       toolEvent("generate_image", pendingResult("s2", 3)),
+      // 审计 E：edit_image 的异步任务此前被工具名白名单漏掉，永久停在"正在生成"
+      toolEvent("edit_image", pendingResult("s3")),
       toolEvent("generate_image", { pending: true }),
       toolEvent("generate_image", {
         candidates: [{ asset_id: "a", url: "u", label: "l" }],
       }),
-      toolEvent("write_copy", { pending: true, image_session_id: "s3" }),
+      // 非生图工具即便带 pending 字段也不轮询（形状判定要求 image_session_id）
+      toolEvent("write_copy", { pending: true }),
       toolEvent("generate_image", {}),
     ];
-    expect(collectPendingImageSessionIds(events)).toEqual(["s1", "s2"]);
+    expect(collectPendingImageSessionIds(events)).toEqual(["s1", "s2", "s3"]);
     expect(collectPendingImageSessionIds([])).toEqual([]);
   });
 });

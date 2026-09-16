@@ -18,11 +18,16 @@ export function pendingImageSessionId(result: AgentToolEvent["result"]): string 
   return typeof id === "string" && id !== "" ? id : null;
 }
 
-/** 从流式 tool_result 里收集需要轮询的 image_session_id（仅 generate_image，去重保序）。 */
+/**
+ * 从 tool_result 里收集需要轮询的 image_session_id（去重保序）。
+ *
+ * 判定按**结果形状**而非工具名：凡是 `pending=true` 且带 `image_session_id` 的结果
+ * 都代表"任务已提交、结果待取"。原先只认 generate_image，导致 edit_image 的异步
+ * 任务永远停在"正在生成"（审计 E 点名项），且新增生图类工具会再次踩同一个坑。
+ */
 export function collectPendingImageSessionIds(events: AgentToolEvent[]): string[] {
   const ids: string[] = [];
   for (const event of events) {
-    if (event.tool !== "generate_image") continue;
     const id = pendingImageSessionId(event.result);
     if (id && !ids.includes(id)) ids.push(id);
   }
@@ -36,7 +41,7 @@ export function expectedCandidatesForSession(
 ): number | null {
   let expected: number | null = null;
   for (const event of events) {
-    if (event.tool !== "generate_image" || pendingImageSessionId(event.result) !== imageSessionId) {
+    if (pendingImageSessionId(event.result) !== imageSessionId) {
       continue;
     }
     const value = event.result.expected_candidates;
@@ -215,7 +220,7 @@ export function createCandidatePoller(options: CandidatePollerOptions): Candidat
 }
 
 /**
- * 工作台候选轮询 hook：为每条 pending 的 generate_image tool_result 按 image_session_id 去重调度
+ * 工作台候选轮询 hook：为每条 pending 的生图类 tool_result 按 image_session_id 去重调度
  * 一个有界轮询器（同一会话多个候选卡共享同一份结果），流结束/会话切换/卸载时清理全部定时器。
  */
 export function useCandidatePolls(events: AgentToolEvent[]): Record<string, CandidatePollState> {
