@@ -6,18 +6,13 @@
 
 from __future__ import annotations
 
-from io import BytesIO
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from productflow_backend.presentation.deps import USER_SESSION_COOKIE
-from tests.test_isolation_products import (  # noqa: F401 - 复用同一套隔离环境与用户夹具
-    _make_user_client,
-    _png,
-    isolation_env,
-)
+from productflow_backend.infrastructure.db.session import get_session_factory
+from tests.test_isolation_products import _make_user_client
 
 
 def test_image_sessions_are_isolated_between_users(
@@ -58,7 +53,6 @@ def test_image_session_asset_download_is_isolated(
         create_image_session_generation_task,
         execute_image_session_generation_task,
     )
-    from productflow_backend.infrastructure.db.session import get_session_factory
     from productflow_backend.presentation.api import create_app
 
     app = create_app()
@@ -105,7 +99,6 @@ def test_gallery_entries_are_isolated(
         execute_image_session_generation_task,
         get_image_session_detail,
     )
-    from productflow_backend.infrastructure.db.session import get_session_factory
     from productflow_backend.presentation.api import create_app
 
     app = create_app()
@@ -152,7 +145,6 @@ def test_isolation_disabled_keeps_current_visibility(
 ) -> None:
     """开关关闭时保持现状：无用户会话也能看到会话列表（整批回退语义）。"""
     from productflow_backend.config import get_settings
-    from productflow_backend.infrastructure.db.session import get_session_factory
     from productflow_backend.presentation.api import create_app
 
     monkeypatch.setenv("DATA_ISOLATION_ENABLED", "false")

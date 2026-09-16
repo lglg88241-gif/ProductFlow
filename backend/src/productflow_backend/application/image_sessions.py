@@ -32,6 +32,7 @@ from productflow_backend.application.image_generation_failures import (
     classify_image_generation_failure,
 )
 from productflow_backend.application.queue_submission import enqueue_or_mark_failed
+from productflow_backend.application.quota import check_can_add_media
 from productflow_backend.application.time import now_utc
 from productflow_backend.config import normalize_image_generation_size
 from productflow_backend.domain.durable_generation_tasks import (
@@ -1157,6 +1158,8 @@ def submit_image_session_generation_task(
     enqueue: Callable[[str], None] | None = None,
     owner_id: str | None = None,
 ) -> ImageSession:
+    # 配额准入：已达/超出额度时拒绝新生成（读取、下载与删除不受限）
+    check_can_add_media(session, owner_id, 0)
     result = create_image_session_generation_task(
         session,
         image_session_id=image_session_id,

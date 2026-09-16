@@ -28,22 +28,6 @@ def _png(width: int = 320, height: int = 320) -> bytes:
     return buffer.getvalue()
 
 
-@pytest.fixture()
-def isolation_env(configured_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """打开数据隔离开关（本文件内所有测试的前提）。
-
-    同时关闭 legacy 管理员门禁，与本地验收的真实部署模式一致（ADMIN_ACCESS_REQUIRED=false）：
-    否则 router 级 require_admin 会先拦下请求，测不到业务隔离本身。
-    """
-    from productflow_backend.config import get_settings
-
-    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "true")
-    monkeypatch.setenv("ADMIN_ACCESS_REQUIRED", "false")
-    # 开启删除开关：否则跨用户删除会先被 403 门禁挡住，测不到归属层判定
-    monkeypatch.setenv("DELETION_ENABLED", "true")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def _make_user_client(app, db, username: str) -> tuple[TestClient, str]:

@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     # 数据隔离开关（批次 B）：开启后业务端点要求用户会话并按 owner 过滤。
     # 默认关闭 = 现状行为；关闭即整批回退，不需要 revert 代码。
     data_isolation_enabled: bool = False
+    # 媒体配额（批次 C）：默认每人 5 GiB，达 80% 告警，超限拒绝新增
+    user_quota_bytes: int = Field(default=5 * 1024**3, ge=1024)
+    user_quota_warn_ratio: float = Field(default=0.8, gt=0, le=1)
+    # 回收站保留天数：删除先进回收站，到期才物理删除
+    media_trash_retention_days: int = Field(default=7, ge=1, le=365)
     deletion_enabled: bool = False
     # 设计师模型瞬时故障（中转站 502 突发）的重试预算：指数退避 + 抖动。
     # 实测中转站过载时，同一时刻单发探测 200 而连续调用 502，故用退避把重试摊到更长的时间轴。

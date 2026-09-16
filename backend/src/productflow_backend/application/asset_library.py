@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from productflow_backend.application.designer_agent.llm import AgentLLMClient, AgentLLMError
 from productflow_backend.application.isolation import ensure_row_readable, owner_filter_expression
+from productflow_backend.application.quota import check_can_add_media, invalidate_usage_cache
 from productflow_backend.domain.errors import BusinessError, NotFoundError
 from productflow_backend.infrastructure.db.models import AssetLibraryEntry
 from productflow_backend.infrastructure.db.session import get_session_factory
@@ -54,6 +55,8 @@ def register_asset_upload(
     settings = get_runtime_settings()
     if len(content) > settings.upload_max_image_bytes:
         raise BusinessError("素材超过大小限制")
+    # 配额准入：超限时给出人话错误而不是让写入把额度撑爆
+    check_can_add_media(db, owner_id, len(content))
     try:
         with Image.open(BytesIO(content)) as image:
             width, height = image.size
@@ -79,6 +82,7 @@ def register_asset_upload(
     db.add(entry)
     db.commit()
     db.refresh(entry)
+    invalidate_usage_cache(owner_id)
     return entry
 
 
@@ -93,6 +97,7 @@ def register_generated_asset(
     owner_id: str | None = None,
 ) -> AssetLibraryEntry:
     storage = LocalStorage()
+    check_can_add_media(db, owner_id, len(content))
     suffix = ".png" if mime_type == "image/png" else ".jpg"
     storage_path = storage.save_library_asset("output", f"generated{suffix}", content)
     entry = AssetLibraryEntry(
@@ -108,6 +113,7 @@ def register_generated_asset(
     db.add(entry)
     db.commit()
     db.refresh(entry)
+    invalidate_usage_cache(owner_id)
     return entry
 
 

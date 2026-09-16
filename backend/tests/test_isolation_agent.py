@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_isolation_products import _make_user_client, _png, isolation_env  # noqa: F401
+from productflow_backend.infrastructure.db.session import get_session_factory
+from tests.test_isolation_products import _make_user_client, _png
 
 
 def test_agent_sessions_are_isolated(isolation_env: None, configured_env: Path, db_session) -> None:
@@ -78,7 +79,6 @@ def test_copy_reports_are_isolated(
     """A 的文案报告：B 列表不可见、下载 404。"""
     from productflow_backend.application.designer_agent.llm import AgentLLMResponse, AgentToolCall
     from productflow_backend.application.designer_agent.loop import create_agent_session, run_agent_turn
-    from productflow_backend.infrastructure.db.session import get_session_factory
     from productflow_backend.presentation.api import create_app
 
     app = create_app()
@@ -124,7 +124,6 @@ def test_metrics_are_scoped_per_user(isolation_env: None, configured_env: Path, 
     """用量统计按用户：A 有会话/消息，B 的数字应为 0（而不是看到 A 的用量）。"""
     from productflow_backend.application.designer_agent.loop import create_agent_session
     from productflow_backend.infrastructure.db.models import AgentMessage
-    from productflow_backend.infrastructure.db.session import get_session_factory
     from productflow_backend.presentation.api import create_app
 
     app = create_app()
@@ -174,7 +173,6 @@ def test_agent_domain_visible_when_isolation_disabled(
 ) -> None:
     """开关关闭 = 现状：无用户会话也能看到全部会话（整批回退语义）。"""
     from productflow_backend.config import get_settings
-    from productflow_backend.infrastructure.db.session import get_session_factory
     from productflow_backend.presentation.api import create_app
 
     monkeypatch.setenv("DATA_ISOLATION_ENABLED", "false")
@@ -193,4 +191,3 @@ def test_agent_domain_visible_when_isolation_disabled(
         assert any(item["title"] == "关闭开关的会话" for item in listing["items"])
     finally:
         get_settings.cache_clear()
-    _ = get_session_factory

@@ -12,6 +12,7 @@ from productflow_backend.application.product_workflow.templates import (
     materialize_product_workflow_from_template,
     resolve_product_creation_canvas_template,
 )
+from productflow_backend.application.quota import check_can_add_media, invalidate_usage_cache
 from productflow_backend.application.time import now_utc
 from productflow_backend.domain.durable_generation_tasks import WORKFLOW_RUN_GENERATION_TASK_CONTRACT
 from productflow_backend.domain.enums import (
@@ -183,6 +184,9 @@ def create_product(
     owner_id: str | None = None,
 ) -> Product:
     """创建商品，保存原始图和参考图到本地存储。owner_id 用于数据隔离归属。"""
+    # 配额准入：主图 + 全部参考图的合计字节数
+    incoming = len(image_bytes) + sum(len(item[0]) for item in (reference_image_uploads or []))
+    check_can_add_media(session, owner_id, incoming)
     canvas_template = resolve_product_creation_canvas_template(canvas_template_key)
     storage = storage or LocalStorage()
     product = Product(
@@ -225,6 +229,7 @@ def create_product(
         )
     session.commit()
     session.expire_all()
+    invalidate_usage_cache(owner_id)
     return _get_product_or_raise(session, product.id, owner_id)
 
 

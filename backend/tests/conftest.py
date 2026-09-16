@@ -194,3 +194,21 @@ def install_scripted_llm(monkeypatch: pytest.MonkeyPatch):
         return client
 
     return _install
+
+
+@pytest.fixture()
+def isolation_env(configured_env: Path, monkeypatch: pytest.MonkeyPatch):
+    """数据隔离开关已开启的环境（批次 B 各隔离测试共用）。
+
+    同时关闭 legacy 管理员门禁，与本地验收的真实部署模式一致（ADMIN_ACCESS_REQUIRED=false）：
+    否则 router 级 require_admin 会先拦下请求，测不到业务隔离本身。
+    并开启删除开关，否则跨用户删除会先被 403 门禁挡住。
+    """
+    from productflow_backend.config import get_settings
+
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "true")
+    monkeypatch.setenv("ADMIN_ACCESS_REQUIRED", "false")
+    monkeypatch.setenv("DELETION_ENABLED", "true")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
