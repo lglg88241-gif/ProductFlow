@@ -127,6 +127,7 @@ def test_production_gate_check_fails_at_create_app_time(
     from productflow_backend.presentation.api import create_app
 
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "true")
     monkeypatch.setenv("ADMIN_ACCESS_REQUIRED", "false")
     get_settings.cache_clear()
     invalidate_runtime_settings_cache()

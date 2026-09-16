@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import timedelta
 from pathlib import Path
 
@@ -306,6 +307,7 @@ def test_production_startup_allows_admin_gate_enabled(
     from productflow_backend.presentation.api import create_app
 
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "true")
     get_settings.cache_clear()
     invalidate_runtime_settings_cache()
     try:
@@ -337,3 +339,92 @@ def test_admin_diagnostics_provider_summary_hides_topology(configured_env: Path)
             expected_keys.add("has_fallback")
         assert set(summary) == expected_keys
         assert isinstance(summary["has_key"], bool)
+
+
+# ---------------------------------------------------------------------------
+# 审计第 1 批：安全默认值与降级配置
+# ---------------------------------------------------------------------------
+
+
+def test_production_refuses_to_start_when_isolation_disabled(
+    configured_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1-01：production 下隔离开关缺失/为 false 必须拒绝启动（不能静默 fail-open）。"""
+    from productflow_backend.presentation.api import create_app
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "false")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+    try:
+        with pytest.raises(RuntimeError, match="数据隔离"):
+            create_app()
+    finally:
+        get_settings.cache_clear()
+        invalidate_runtime_settings_cache()
+
+
+def test_development_allows_isolation_off_with_explicit_env(
+    configured_env: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """开发模式关闭隔离允许启动，但必须留下明确告警（显式声明开发模式）。"""
+    from productflow_backend.presentation.api import create_app
+
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "false")
+    monkeypatch.setenv("ADMIN_ACCESS_REQUIRED", "false")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+    try:
+        with caplog.at_level(logging.WARNING):
+            app = create_app()
+        assert app is not None
+        assert any("数据隔离已关闭" in record.getMessage() for record in caplog.records)
+    finally:
+        get_settings.cache_clear()
+        invalidate_runtime_settings_cache()
+
+
+def test_production_starts_when_isolation_enabled(
+    configured_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """正例：production + 隔离开启 → 正常构建（确认上面的拒绝不是无条件拦截）。"""
+    from productflow_backend.presentation.api import create_app
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "true")
+    get_settings.cache_clear()
+    invalidate_runtime_settings_cache()
+    try:
+        assert create_app() is not None
+    finally:
+        get_settings.cache_clear()
+        invalidate_runtime_settings_cache()
+
+
+def test_fallback_defaults_to_empty_and_is_not_wired(
+    configured_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-03：fallback 默认空；模型/地址/凭据不全时不启用降级链。"""
+    from productflow_backend.application.designer_agent.llm import (
+        FallbackAgentLLMClient,
+        OpenAICompatAgentClient,
+        build_agent_llm_client,
+    )
+    from productflow_backend.config import get_settings, invalidate_runtime_settings_cache
+
+    for var in ("AGENT_FALLBACK_API_KEY", "AGENT_FALLBACK_BASE_URL", "AGENT_FALLBACK_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGENT_PROVIDER_KIND", "openai")
+    monkeypatch.setenv("AGENT_API_KEY", "sk-primary")
+    monkeypatch.setenv("AGENT_BASE_URL", "https://relay.example.com/v1")
+    invalidate_runtime_settings_cache()
+    get_settings.cache_clear()
+    try:
+        assert get_settings().agent_fallback_model == "", "fallback 模型默认必须为空"
+        client = build_agent_llm_client()
+        assert isinstance(client, OpenAICompatAgentClient)
+        assert not isinstance(client, FallbackAgentLLMClient), "配置不全时不应装上降级链"
+    finally:
+        get_settings.cache_clear()
+        invalidate_runtime_settings_cache()

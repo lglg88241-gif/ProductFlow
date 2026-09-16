@@ -1505,6 +1505,7 @@ def test_production_rejects_disabling_admin_access_via_runtime_config(
     from productflow_backend.presentation.api import create_app
 
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "true")
     get_settings.cache_clear()
     invalidate_runtime_settings_cache()
 
@@ -1555,6 +1556,7 @@ def test_session_cookie_secure_defaults_by_environment(
     assert get_settings().session_cookie_secure is False
 
     monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATA_ISOLATION_ENABLED", "true")
     get_settings.cache_clear()
     invalidate_runtime_settings_cache()
     assert get_settings().session_cookie_secure is True

@@ -64,6 +64,22 @@ def create_app() -> FastAPI:
             )
         logging.getLogger(__name__).warning("管理员访问密钥已关闭：API 当前对所有来源开放")
 
+    # 数据隔离开关（审计 S1-01）：默认 fail-open 是隐患——缺失 .env、拼写错误或新环境
+    # 配置遗漏都会静默关闭隔离。生产模式缺失或为 false 一律拒绝启动；开发模式需显式声明。
+    _isolation_enabled = get_settings().data_isolation_enabled
+    if not _isolation_enabled:
+        if get_settings().app_env.strip().lower() == "production":
+            raise RuntimeError(
+                "production 环境必须开启数据隔离（DATA_ISOLATION_ENABLED=true），已拒绝启动。"
+                "本地开发请显式设置 APP_ENV=development"
+            )
+        logging.getLogger(__name__).warning(
+            "数据隔离已关闭（DATA_ISOLATION_ENABLED=false）：业务端点不要求用户会话、不做归属过滤。"
+            "仅限本机开发；容器部署请确认 compose 已注入该变量"
+        )
+    else:
+        logging.getLogger(__name__).info("数据隔离已开启：业务端点要求用户会话并按归属过滤")
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         cleanup_old_logs(settings)

@@ -159,7 +159,9 @@ class Settings(BaseSettings):
     agent_model: str = "grok-4.6"
     agent_fallback_api_key: str | None = None
     agent_fallback_base_url: str | None = None
-    agent_fallback_model: str = "gemini-3.8-flash"
+    # 审计 R1-03：默认留空。只有模型、地址、凭据齐全且经真实小额调用验证过才应配置，
+    # 指向已知不可用的模型只会让降级路径产生误导性失败。
+    agent_fallback_model: str = ""
 
     text_provider_kind: str = "mock"
     text_api_key: str | None = None
