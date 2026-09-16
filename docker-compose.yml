@@ -43,6 +43,8 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-production}
       ADMIN_ACCESS_REQUIRED: ${ADMIN_ACCESS_REQUIRED:-true}
+      # 数据隔离开关：开启后业务端点要求用户会话并按归属过滤（批次 B）
+      DATA_ISOLATION_ENABLED: ${DATA_ISOLATION_ENABLED:-false}
       # 内网部署明确保持无门禁时设为 1（否则 production + 无门禁会拒绝启动）
       ADMIN_GATE_OPEN_IN_PRODUCTION: ${ADMIN_GATE_OPEN_IN_PRODUCTION:-}
       APP_HOST: 0.0.0.0
@@ -142,6 +144,8 @@ services:
       DATABASE_URL: postgresql+psycopg://productflow:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@productflow-postgres:5432/productflow
       REDIS_URL: redis://productflow-redis:6379/0
       STORAGE_ROOT: /app/storage
+      # 数据隔离开关：worker 侧 service 层同样按归属判定（批次 B）
+      DATA_ISOLATION_ENABLED: ${DATA_ISOLATION_ENABLED:-false}
       LOG_DIR: /app/storage/logs
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_MAX_BYTES: ${LOG_MAX_BYTES:-10485760}
