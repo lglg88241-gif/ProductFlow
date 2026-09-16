@@ -45,9 +45,14 @@ import type {
   SettingsImportPreviewResponse,
   SessionState,
   UpdateUserTemplateGroupInput,
+  AuthUser,
 } from "./types";
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+
+/** 用户登录类端点的 CSRF 最小防线头：所有非 GET 请求统一附加（与后端 user_auth 约定一致） */
+const CSRF_HEADER_NAME = "X-Requested-With";
+const CSRF_HEADER_VALUE = "productflow";
 
 export class ApiError extends Error {
   status: number;
@@ -68,13 +73,16 @@ function toApiUrl(path: string): string {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
   const response = await fetch(toApiUrl(path), {
+    ...init,
     credentials: "include",
     headers: {
       ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      // 非 GET 一律带上 CSRF 校验头；调用方显式传入的同名头可覆盖
+      ...(method === "GET" ? {} : { [CSRF_HEADER_NAME]: CSRF_HEADER_VALUE }),
       ...init?.headers,
     },
-    ...init,
   });
 
   if (!response.ok) {
@@ -107,6 +115,19 @@ export const api = {
   },
   destroySession(): Promise<{ ok: boolean }> {
     return request("/api/auth/session", { method: "DELETE" });
+  },
+  /** 当前用户账号（数据隔离开启时用于鉴权判定；401 = 未登录） */
+  getMe(): Promise<AuthUser> {
+    return request<AuthUser>("/api/auth/user/me");
+  },
+  userLogin(username: string, password: string): Promise<AuthUser> {
+    return request("/api/auth/user/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+  },
+  userLogout(): Promise<{ ok: boolean }> {
+    return request("/api/auth/user/logout", { method: "POST" });
   },
   listProducts(input?: { page?: number; page_size?: number }): Promise<ProductListResponse> {
     const page = input?.page ?? 1;
@@ -491,7 +512,7 @@ export const api = {
   ): Promise<Record<string, unknown> | null> {
     const response = await fetch(toApiUrl(`/api/agent/sessions/${sessionId}/messages/stream`), {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", [CSRF_HEADER_NAME]: CSRF_HEADER_VALUE },
       credentials: "include",
       body: JSON.stringify({ content }),
     });

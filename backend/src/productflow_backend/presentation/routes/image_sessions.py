@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from productflow_backend.application.image_sessions import (
     delete_image_session,
     delete_image_session_reference_image,
     discuss_image_session,
+    get_image_session_asset_for_download,
     get_image_session_detail,
     get_image_session_status,
     list_image_sessions,
@@ -21,9 +22,14 @@ from productflow_backend.application.image_sessions import (
     submit_image_session_generation_task,
     update_image_session,
 )
-from productflow_backend.infrastructure.db.models import ImageSessionAsset
+from productflow_backend.infrastructure.db.models import UserAccount
 from productflow_backend.infrastructure.storage import ImageVariantName
-from productflow_backend.presentation.deps import get_session, require_admin, require_deletion_enabled
+from productflow_backend.presentation.deps import (
+    get_session,
+    require_admin,
+    require_business_user,
+    require_deletion_enabled,
+)
 from productflow_backend.presentation.image_variants import serve_image_variant
 from productflow_backend.presentation.schemas.image_sessions import (
     AttachImageSessionAssetRequest,
@@ -49,16 +55,22 @@ from productflow_backend.presentation.upload_validation import (
 router = APIRouter(prefix="/api", tags=["image-sessions"], dependencies=[Depends(require_admin)])
 
 
+def _owner_id(user: UserAccount | None) -> str | None:
+    return str(user.id) if user is not None else None
+
+
 @router.get("/image-sessions", response_model=ImageSessionListResponse)
 def list_image_sessions_endpoint(
     limit: int = Query(default=50, ge=1, le=MAX_IMAGE_SESSION_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionListResponse:
-    items = list_image_sessions(session, limit=limit, offset=offset)
+    owner_id = _owner_id(user)
+    items = list_image_sessions(session, limit=limit, offset=offset, owner_id=owner_id)
     return ImageSessionListResponse(
         items=[serialize_image_session_summary(item) for item in items],
-        total=count_image_sessions(session),
+        total=count_image_sessions(session, owner_id=owner_id),
     )
 
 
@@ -66,8 +78,9 @@ def list_image_sessions_endpoint(
 def create_image_session_endpoint(
     payload: CreateImageSessionRequest,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
-    image_session = create_image_session(session, title=payload.title)
+    image_session = create_image_session(session, title=payload.title, owner_id=_owner_id(user))
     return serialize_image_session_detail(image_session)
 
 
@@ -75,8 +88,9 @@ def create_image_session_endpoint(
 def get_image_session_detail_endpoint(
     image_session_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
-    image_session = get_image_session_detail(session, image_session_id)
+    image_session = get_image_session_detail(session, image_session_id, owner_id=_owner_id(user))
     return serialize_image_session_detail(image_session)
 
 
@@ -84,8 +98,9 @@ def get_image_session_detail_endpoint(
 def get_image_session_status_endpoint(
     image_session_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionStatusResponse:
-    snapshot = get_image_session_status(session, image_session_id)
+    snapshot = get_image_session_status(session, image_session_id, owner_id=_owner_id(user))
     return serialize_image_session_status(snapshot)
 
 
@@ -94,8 +109,14 @@ def update_image_session_endpoint(
     image_session_id: str,
     payload: UpdateImageSessionRequest,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
-    image_session = update_image_session(session, image_session_id=image_session_id, title=payload.title)
+    image_session = update_image_session(
+        session,
+        image_session_id=image_session_id,
+        title=payload.title,
+        owner_id=_owner_id(user),
+    )
     return serialize_image_session_detail(image_session)
 
 
@@ -107,6 +128,7 @@ def create_image_session_message_endpoint(
     image_session_id: str,
     payload: CreateImageSessionMessageRequest,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDiscussionResponse:
     result = discuss_image_session(
         session,
@@ -114,6 +136,7 @@ def create_image_session_message_endpoint(
         content=payload.content,
         current_asset_id=payload.current_asset_id,
         selected_reference_asset_ids=payload.selected_reference_asset_ids,
+        owner_id=_owner_id(user),
     )
     return ImageSessionDiscussionResponse(
         user_message=serialize_image_session_message(result.user_message),
@@ -130,8 +153,9 @@ def create_image_session_message_endpoint(
 def delete_image_session_endpoint(
     image_session_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> None:
-    delete_image_session(session, image_session_id=image_session_id)
+    delete_image_session(session, image_session_id=image_session_id, owner_id=_owner_id(user))
 
 
 @router.post("/image-sessions/{image_session_id}/reference-images", response_model=ImageSessionDetailResponse)
@@ -139,6 +163,7 @@ async def upload_image_session_reference_images_endpoint(
     image_session_id: str,
     reference_images: list[UploadFile] = File(...),
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
     payloads: list[tuple[bytes, str, str]] = []
     validate_reference_image_count(len(reference_images))
@@ -155,6 +180,7 @@ async def upload_image_session_reference_images_endpoint(
         session,
         image_session_id=image_session_id,
         reference_image_uploads=payloads,
+        owner_id=_owner_id(user),
     )
     return serialize_image_session_detail(image_session)
 
@@ -167,11 +193,13 @@ def delete_image_session_reference_image_endpoint(
     image_session_id: str,
     asset_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
     image_session = delete_image_session_reference_image(
         session,
         image_session_id=image_session_id,
         asset_id=asset_id,
+        owner_id=_owner_id(user),
     )
     return serialize_image_session_detail(image_session)
 
@@ -185,6 +213,7 @@ def generate_image_session_round_endpoint(
     image_session_id: str,
     payload: GenerateImageSessionRoundRequest,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
     image_session = submit_image_session_generation_task(
         session,
@@ -195,6 +224,7 @@ def generate_image_session_round_endpoint(
         selected_reference_asset_ids=payload.selected_reference_asset_ids,
         generation_count=payload.generation_count,
         tool_options=payload.tool_options.model_dump(exclude_none=True) if payload.tool_options else None,
+        owner_id=_owner_id(user),
     )
     return serialize_image_session_detail(image_session)
 
@@ -208,11 +238,13 @@ def retry_image_session_generation_task_endpoint(
     image_session_id: str,
     task_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
     image_session = retry_image_session_generation_task(
         session,
         image_session_id=image_session_id,
         task_id=task_id,
+        owner_id=_owner_id(user),
     )
     return serialize_image_session_detail(image_session)
 
@@ -225,11 +257,13 @@ def cancel_image_session_generation_task_endpoint(
     image_session_id: str,
     task_id: str,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ImageSessionDetailResponse:
     image_session = cancel_image_session_generation_task(
         session,
         image_session_id=image_session_id,
         task_id=task_id,
+        owner_id=_owner_id(user),
     )
     return serialize_image_session_detail(image_session)
 
@@ -243,6 +277,7 @@ def attach_image_session_asset_to_product_endpoint(
     asset_id: str,
     payload: AttachImageSessionAssetRequest,
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> ProductWritebackResponse:
     product = attach_image_session_asset_to_product(
         session,
@@ -250,6 +285,7 @@ def attach_image_session_asset_to_product_endpoint(
         asset_id=asset_id,
         target=payload.target,
         product_id=payload.product_id,
+        owner_id=_owner_id(user),
     )
     message = "已加入商品参考图" if payload.target == "reference" else "已设为商品主图"
     return ProductWritebackResponse(product_id=product.id, message=message)
@@ -260,10 +296,9 @@ def download_image_session_asset_endpoint(
     asset_id: str,
     variant: ImageVariantName = Query(default="original"),
     session: Session = Depends(get_session),
+    user: UserAccount | None = Depends(require_business_user),
 ) -> FileResponse:
-    asset = session.get(ImageSessionAsset, asset_id)
-    if asset is None:
-        raise HTTPException(status_code=404, detail="会话图片不存在")
+    asset = get_image_session_asset_for_download(session, asset_id, owner_id=_owner_id(user))
     return serve_image_variant(
         storage_path=asset.storage_path,
         original_filename=asset.original_filename,

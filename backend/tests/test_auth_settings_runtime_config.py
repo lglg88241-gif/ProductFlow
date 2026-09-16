@@ -108,7 +108,12 @@ def test_admin_access_can_be_disabled_and_re_enabled(configured_env: Path) -> No
 
     session_state = public_client.get("/api/auth/session")
     assert session_state.status_code == 200
-    assert session_state.json() == {"authenticated": True, "access_required": False}
+    assert session_state.json() == {
+        "authenticated": True,
+        "access_required": False,
+        # 批次 B：前端据此决定登录形态（用户登录 vs 管理员密钥）
+        "data_isolation_enabled": False,
+    }
 
     disabled_login = public_client.post("/api/auth/session", json={"admin_key": ""})
     assert disabled_login.status_code == 200
@@ -138,7 +143,11 @@ def test_admin_access_can_be_disabled_and_re_enabled(configured_env: Path) -> No
 
     required_session = new_client.get("/api/auth/session")
     assert required_session.status_code == 200
-    assert required_session.json() == {"authenticated": False, "access_required": True}
+    assert required_session.json() == {
+        "authenticated": False,
+        "access_required": True,
+        "data_isolation_enabled": False,
+    }
 
 
 def test_settings_api_requires_secondary_unlock(configured_env: Path) -> None:

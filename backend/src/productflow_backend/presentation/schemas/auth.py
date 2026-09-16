@@ -14,3 +14,4 @@ class SessionResponse(BaseModel):
 class SessionStateResponse(BaseModel):
     authenticated: bool
     access_required: bool
+    data_isolation_enabled: bool = False

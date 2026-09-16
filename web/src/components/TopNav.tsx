@@ -12,14 +12,18 @@ import {
   Settings,
   Sparkles,
   Sun,
+  User,
   Wand2,
 } from "lucide-react";
 import type { FocusEvent, MouseEvent } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
+import { api } from "../lib/api";
 import { LOCALES, LOCALE_LABEL_KEYS, type Locale } from "../lib/i18n";
 import { usePreferences } from "../lib/preferences";
 import { THEME_PREFERENCES, type ThemePreference } from "../lib/theme";
+import { isDataIsolationEnabled } from "../lib/userAuth";
 
 interface TopNavProps {
   breadcrumbs?: string;
@@ -151,10 +155,32 @@ function LanguagePicker({ compact = false }: { compact?: boolean }) {
 
 export function TopNav({ breadcrumbs, onHome, onLogout }: TopNavProps) {
   const location = useLocation();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { t, themePreference, setThemePreference } = usePreferences();
   const CurrentThemeIcon = themeIcons[themePreference];
   const nextThemePreference =
     THEME_PREFERENCES[(THEME_PREFERENCES.indexOf(themePreference) + 1) % THEME_PREFERENCES.length];
+
+  // 数据隔离开启时在导航栏展示当前用户与"退出"（用户会话）；关闭时完全不出现（现状）
+  const sessionQuery = useQuery({ queryKey: ["session"], queryFn: api.getSessionState, retry: false });
+  const dataIsolationEnabled = isDataIsolationEnabled(sessionQuery.data);
+  const meQuery = useQuery({
+    queryKey: ["user-me"],
+    queryFn: api.getMe,
+    enabled: dataIsolationEnabled,
+    retry: false,
+  });
+  const isolationUser = dataIsolationEnabled && meQuery.isSuccess ? meQuery.data : undefined;
+
+  const userLogoutMutation = useMutation({
+    mutationFn: api.userLogout,
+    onSettled: async () => {
+      queryClient.removeQueries({ queryKey: ["user-me"] });
+      await queryClient.invalidateQueries({ queryKey: ["session"] });
+      navigate("/login", { replace: true });
+    },
+  });
 
   return (
     <>
@@ -238,7 +264,26 @@ export function TopNav({ breadcrumbs, onHome, onLogout }: TopNavProps) {
               );
             })}
           </div>
-          {onLogout ? (
+          {isolationUser ? (
+            <div className="flex min-w-0 items-center gap-1">
+              <span
+                title={t("nav.currentUser")}
+                className="flex min-w-0 items-center rounded-lg px-2 py-1.5 text-xs font-medium text-slate-600 dark:text-slate-300"
+              >
+                <User size={14} className="mr-1.5 shrink-0 text-slate-400" aria-hidden="true" />
+                <span className="max-w-[10rem] truncate">{isolationUser.display_name || isolationUser.username}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => userLogoutMutation.mutate()}
+                aria-label={t("nav.logout")}
+                title={t("nav.logout")}
+                className="flex items-center rounded-lg px-3 py-2 text-sm font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+              >
+                <LogOut size={15} className="sm:mr-1.5" /> <span className="hidden sm:inline">{t("nav.logout")}</span>
+              </button>
+            </div>
+          ) : onLogout ? (
             <button
               type="button"
               onClick={onLogout}

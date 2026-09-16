@@ -37,9 +37,12 @@ def create_session(payload: SessionCreateRequest, request: Request) -> SessionRe
 @router.get("/session", response_model=SessionStateResponse)
 def get_session_state(request: Request) -> SessionStateResponse:
     access_required = get_runtime_settings().admin_access_required
+    from productflow_backend.config import get_settings
+
     return SessionStateResponse(
         authenticated=not access_required or bool(request.session.get("is_authenticated")),
         access_required=access_required,
+        data_isolation_enabled=get_settings().data_isolation_enabled,
     )
 
 

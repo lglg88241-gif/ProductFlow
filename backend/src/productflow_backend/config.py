@@ -231,6 +231,9 @@ class Settings(BaseSettings):
         le=24 * 60 * 60,
     )
     admin_access_required: bool = True
+    # 数据隔离开关（批次 B）：开启后业务端点要求用户会话并按 owner 过滤。
+    # 默认关闭 = 现状行为；关闭即整批回退，不需要 revert 代码。
+    data_isolation_enabled: bool = False
     deletion_enabled: bool = False
     # 设计师模型瞬时故障（中转站 502 突发）的重试预算：指数退避 + 抖动。
     # 实测中转站过载时，同一时刻单发探测 200 而连续调用 502，故用退避把重试摊到更长的时间轴。

@@ -5,6 +5,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { api } from "./lib/api";
 import { PreferencesProvider, useI18n } from "./lib/preferences";
+import { isDataIsolationEnabled } from "./lib/userAuth";
 
 const GalleryPage = lazy(() =>
   import("./pages/GalleryPage").then((module) => ({ default: module.GalleryPage })),
@@ -52,7 +53,17 @@ function AppRoutes() {
     retry: false,
   });
 
-  const authenticated = Boolean(sessionQuery.data?.authenticated);
+  // 数据隔离开启时改查用户会话决定鉴权；关闭时完全维持 admin-key 会话的现状
+  const dataIsolationEnabled = isDataIsolationEnabled(sessionQuery.data);
+  const meQuery = useQuery({
+    queryKey: ["user-me"],
+    queryFn: api.getMe,
+    enabled: dataIsolationEnabled,
+    retry: false,
+  });
+
+  const authenticated = dataIsolationEnabled ? meQuery.isSuccess : Boolean(sessionQuery.data?.authenticated);
+  const authLoading = sessionQuery.isLoading || (dataIsolationEnabled && meQuery.isLoading);
 
   useEffect(() => {
     if (!authenticated) {
@@ -62,14 +73,17 @@ function AppRoutes() {
     void loadImageChatPage();
   }, [authenticated]);
 
-  if (sessionQuery.isLoading) {
+  if (authLoading) {
     return <LoadingScreen />;
   }
 
   return (
     <Suspense fallback={<LoadingScreen />}>
       <Routes>
-        <Route path="/login" element={<LoginPage authenticated={authenticated} />} />
+        <Route
+          path="/login"
+          element={<LoginPage authenticated={authenticated} dataIsolationEnabled={dataIsolationEnabled} />}
+        />
         <Route
           path="/products"
           element={authenticated ? <ProductListPage /> : <Navigate to="/login" replace />}

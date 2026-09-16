@@ -39,6 +39,16 @@ export type CanvasTemplateScenario =
 export interface SessionState {
   authenticated: boolean;
   access_required: boolean;
+  /** 数据隔离开关（后端 DATA_ISOLATION_ENABLED）；旧后端可能不下发，缺省视为关闭 */
+  data_isolation_enabled?: boolean;
+}
+
+/** 用户账号（/api/auth/user/* 端点，与 admin-key 会话相互独立） */
+export interface AuthUser {
+  id: string;
+  username: string;
+  role: string;
+  display_name: string | null;
 }
 
 export interface SourceAsset {
